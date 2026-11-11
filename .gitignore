@@ -1,0 +1,28 @@
+# Local credentials and provider configuration
+.env
+.env.*
+!.env.example
+keys.json
+edgeKey.json
+env.json
+google-services.json
+GoogleService-Info.plist
+*.keystore
+*.jks
+*.p12
+*.p8
+*.mobileprovision
+
+# Generated application dependencies and build outputs
+node_modules/
+dist/
+build/
+coverage/
+.gradle/
+Pods/
+local.properties
+
+# Local tooling and operating system files
+*.log
+.DS_Store
+Thumbs.db
