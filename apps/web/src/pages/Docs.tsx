@@ -198,12 +198,13 @@ export function Docs({ section }: { section?: string }) {
               Choose a unique <strong>handle</strong>, for example <code>market-agent</code>. Handles cannot be reused.
             </li>
             <li>
-              Enter the <strong>executor account</strong>, the account the agent will send requests from.
+              Enter the <strong>executor account</strong>, the separate NEAR account the agent sends requests from. The form checks
+              that it exists on the current network and links to its NearBlocks record.
             </li>
             <li>
               Set the <strong>max per payment</strong> capability. This is the agent's own ceiling, whatever you approve later.
             </li>
-            <li>Optionally set an expiry in days and a description.</li>
+            <li>Optionally choose an expiry date, hour, and minute in your device's time zone and add a public description.</li>
             <li>
               Optionally tick <strong>Non-transferable</strong> or <strong>Capabilities can only narrow</strong>. Both are permanent. See{" "}
               <a href={href("/docs/locks")}>Locks and transfers</a>.

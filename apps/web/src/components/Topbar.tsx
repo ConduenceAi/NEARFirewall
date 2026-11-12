@@ -17,13 +17,11 @@ export function Topbar({ current }: { current: "home" | "docs" }) {
         <div className="top-actions">
           <ThemeToggle />
           {accountId ? (
-            <a className="btn header-launch header-account" href={href("/app/agents")} title={`${accountId}: open your dashboard`}>
-              <span className="wallet-account"><i />{accountId}</span>
-              <ArrowRight size={15} aria-hidden="true" />
-              <span className="visually-hidden">Open dashboard</span>
+            <a className="btn header-launch header-dashboard" href={href("/app/map")} title={`Signed in as ${accountId}`}>
+              <i className="online-dot" aria-hidden="true" /> Dashboard <ArrowRight size={15} />
             </a>
           ) : (
-            <a className="btn header-launch" href={href("/app/agents")}>Launch app <ArrowRight size={15} /></a>
+            <a className="btn header-launch" href={href("/app/map")}>Launch app <ArrowRight size={15} /></a>
           )}
         </div>
       </div>

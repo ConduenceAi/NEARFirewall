@@ -38,7 +38,7 @@ export function Landing() {
               <h1 id="hero-title">Let agents pay.<br /><span>Keep the keys.</span></h1>
               <p className="lead">Give agents a budget from your existing NEAR account. You choose who they can pay and how much. NEARFirewall enforces the rules on-chain.</p>
               <div className="cta-row">
-                <a className="btn primary" href={href("/app/agents")}>{accountId ? "Open dashboard" : "Launch app"} <ArrowRight size={16} /></a>
+                <a className="btn primary" href={href("/app/map")}>{accountId ? "Open dashboard" : "Launch app"} <ArrowRight size={16} /></a>
                 <a className="text-link" href={href("/docs")}>Read the docs <ArrowRight size={15} /></a>
               </div>
             </div>
@@ -97,7 +97,7 @@ export function Landing() {
 
         <section className="landing-section launch-strip" aria-labelledby="launch-title">
           <h2 id="launch-title">Put your first agent on a budget.</h2>
-          <a className="btn primary" href={href("/app/agents")}>{accountId ? "Open dashboard" : "Launch app"} <ArrowRight size={16} aria-hidden="true" /></a>
+          <a className="btn primary" href={href("/app/map")}>{accountId ? "Open dashboard" : "Launch app"} <ArrowRight size={16} aria-hidden="true" /></a>
         </section>
       </main>
 

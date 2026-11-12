@@ -86,7 +86,7 @@ export function ActivityPanel() {
 
   return (
     <section aria-labelledby="activity-heading">
-      <h1 id="activity-heading">Activity</h1>
+      <h1 id="activity-heading" className="visually-hidden">Activity</h1>
       <div className="toolbar">
         <div className="pills" role="group" aria-label="Filter by outcome">
           {FILTERS.map((f) => (

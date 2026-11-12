@@ -1,14 +1,17 @@
-import { ArrowRight, Bot, ListFilter, LogOut, Wallet, WalletCards } from "lucide-react";
+import { useState } from "react";
+import { ArrowRight, Bot, ListFilter, LogOut, Network, PanelLeftClose, PanelLeftOpen, Wallet, WalletCards } from "lucide-react";
 import { Brand } from "../components/Brand.tsx";
 import { AgentsPanel } from "../components/AgentsPanel.tsx";
 import { PaymentsPanel } from "../components/PaymentsPanel.tsx";
 import { ActivityPanel } from "../components/ActivityPanel.tsx";
+import { AgentMap } from "../components/AgentMap.tsx";
 import { ThemeToggle } from "../theme.tsx";
 import { useWallet } from "../wallet.tsx";
 import { href } from "../router.ts";
 import { OnboardingGuide } from "../onboarding.tsx";
 
 const OPERATIONS = [
+  { id: "map", label: "Agent map", icon: Network },
   { id: "agents", label: "Agents", icon: Bot },
   { id: "payments", label: "Payments", icon: WalletCards },
   { id: "activity", label: "Activity", icon: ListFilter },
@@ -18,6 +21,8 @@ export type Panel = (typeof OPERATIONS)[number]["id"];
 
 export function AppShell({ panel }: { panel: Panel }) {
   const { accountId, connect, disconnect } = useWallet();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const sidebarAction = sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar";
 
   return (
     <div className={`shell${accountId ? " connected" : ""}`}>
@@ -43,15 +48,36 @@ export function AppShell({ panel }: { panel: Panel }) {
       </header>
 
       {accountId ? (
-        <main className="content">
-          <nav className="workspace-nav" aria-label="Operations">
-            {OPERATIONS.map(({ id, label, icon: Icon }) => (
-              <a key={id} href={href(`/app/${id}`)} aria-current={panel === id ? "page" : undefined}>
-                <Icon size={17} aria-hidden="true" />{label}
-              </a>
-            ))}
-          </nav>
-          <div className="workspace-panel">
+        <main className="content workspace" data-sidebar-collapsed={sidebarCollapsed}>
+          <aside className="workspace-sidebar">
+            <button
+              className="icon-btn sidebar-toggle"
+              type="button"
+              onClick={() => setSidebarCollapsed((collapsed) => !collapsed)}
+              aria-label={sidebarAction}
+              aria-expanded={!sidebarCollapsed}
+              aria-controls="workspace-navigation"
+              title={sidebarAction}
+            >
+              {sidebarCollapsed ? <PanelLeftOpen size={17} aria-hidden="true" /> : <PanelLeftClose size={17} aria-hidden="true" />}
+            </button>
+            <nav id="workspace-navigation" className="workspace-nav sidebar" aria-label="Dashboard">
+              {OPERATIONS.map(({ id, label, icon: Icon }) => (
+                <a
+                  key={id}
+                  href={href(`/app/${id}`)}
+                  aria-current={panel === id ? "page" : undefined}
+                  aria-label={sidebarCollapsed ? label : undefined}
+                  title={sidebarCollapsed ? label : undefined}
+                >
+                  <Icon size={17} aria-hidden="true" />
+                  <span className="sidebar-label">{label}</span>
+                </a>
+              ))}
+            </nav>
+          </aside>
+          <div className={`workspace-panel${panel === "map" ? " wide" : ""}`}>
+            {panel === "map" && <AgentMap />}
             {panel === "agents" && <AgentsPanel />}
             {panel === "payments" && <PaymentsPanel />}
             {panel === "activity" && <ActivityPanel />}

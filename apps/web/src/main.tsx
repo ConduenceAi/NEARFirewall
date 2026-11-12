@@ -8,14 +8,14 @@ import { Docs } from "./pages/Docs.tsx";
 import { AppShell, type Panel } from "./pages/AppShell.tsx";
 import "./styles.css";
 
-const PANELS: Panel[] = ["agents", "payments", "activity"];
+const PANELS: Panel[] = ["map", "agents", "payments", "activity"];
 
 function App() {
   const path = usePath();
   const [, area, rest] = path.split("/");
 
   if (area === "docs") return <Docs section={rest} />;
-  if (area === "app") return <AppShell panel={PANELS.includes(rest as Panel) ? (rest as Panel) : "agents"} />;
+  if (area === "app") return <AppShell panel={PANELS.includes(rest as Panel) ? (rest as Panel) : "map"} />;
   return <Landing />;
 }
 
