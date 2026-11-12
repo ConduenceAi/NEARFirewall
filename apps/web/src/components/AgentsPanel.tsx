@@ -248,6 +248,7 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
   const [freeze, setFreeze] = useState(false);
   return (
     <form
+      id="register-agent"
       className="card register-form"
       onSubmit={(e) => {
         e.preventDefault();

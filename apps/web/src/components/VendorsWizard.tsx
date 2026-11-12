@@ -85,7 +85,7 @@ export function VendorsWizard({ payer, busy }: { payer: string; busy: boolean })
   const update = (i: number, patch: Partial<RecipientRow>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
 
   return (
-    <div className="card">
+    <div className="card" id="approve-vendors">
       <h3>Approve vendors</h3>
       <p className="hint">One signature per step. Each recipient gets its own per-payment and daily limit, inside the agent's daily budget.</p>
       <label className="check">

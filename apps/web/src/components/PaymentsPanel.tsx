@@ -62,7 +62,7 @@ function EnableCard({ accountId, busy, exec }: { accountId: string; busy: boolea
     return exec("Enable payments", enablePayments(accountId, config.registryId, { code }, accountCap));
   };
   return (
-    <div className="card">
+    <div className="card" id="enable-payments">
       <h3>Enable agent payments on your account</h3>
       <p>
         This installs the NEARFirewall payment policy on <strong>{accountId}</strong> and connects it to the registry

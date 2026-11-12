@@ -6,6 +6,7 @@ import { ActivityPanel } from "../components/ActivityPanel.tsx";
 import { ThemeToggle } from "../theme.tsx";
 import { useWallet } from "../wallet.tsx";
 import { href } from "../router.ts";
+import { OnboardingGuide } from "../onboarding.tsx";
 
 const OPERATIONS = [
   { id: "agents", label: "Agents", icon: Bot },
@@ -55,6 +56,7 @@ export function AppShell({ panel }: { panel: Panel }) {
             {panel === "payments" && <PaymentsPanel />}
             {panel === "activity" && <ActivityPanel />}
           </div>
+          <OnboardingGuide accountId={accountId} panel={panel} />
         </main>
       ) : (
         <main className="gate">
