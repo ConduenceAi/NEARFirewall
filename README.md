@@ -369,13 +369,26 @@ The planned repository layout is `contracts/registry`, `contracts/vault`, `contr
 5. **Key compromise.** Alice deletes the runtime key, and the next submission is rejected by the network. She adds a new restricted key and execution resumes without any registry change.
 6. **Developer surfaces.** Run the rental flow through the marketplace and through the CLI alone. Confirm that MCP returns the same preview as the SDK and that its prepare tools produce transactions the user can inspect and sign. Publish the deployment manifest and demo transaction hashes when these flows pass.
 
+## Future wallet integration
+
+The wallet becomes the owner's interface for agent grants, spending limits, approvals, revocation, and alerts. The first wallet integration can surface the existing vault controls directly in the wallet. A later smart-account integration moves those controls to the account that holds the protected balance. The registry continues to resolve agent identity and access.
+
+| Control | Enforcement point | Behavior |
+| --- | --- | --- |
+| Block navigation | The wallet's in-app browser or installed browser extension | A wallet security feed carries scoped domain reports from authorized publishers. The wallet verifies the feed, matches the normalized host, and blocks matching navigation, including redirects. A browser extension can install dynamic block rules through Manifest V3. [Chrome request rules](https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest) · [Android WebView navigation](https://developer.android.com/reference/android/webkit/WebViewClient) · [Apple WebKit navigation](https://developer.apple.com/documentation/webkit/wknavigationdelegate) |
+| Reject a signing request | The wallet's connection and signing layer | Bind supported dApp sessions to the origin verified by the browser or connector. Check that origin again on every signing request so an already connected site loses signing access when it is flagged. Show the rejection in wallet activity. |
+| Enforce agent spending | The user's smart-account contract | Give the agent a restricted execution route. Validate the exact action, target, asset, recipient, amount, and remaining budget against the current mandate. Check pause and reserve funds before dispatch, including when a pending approval is released. Any route that can move agent-managed funds must apply the same checks. [NEAR access keys](https://docs.near.org/protocol/accounts-contracts/access-keys) · [NEAR asynchronous calls](https://docs.near.org/smart-contracts/anatomy/crosscontract) |
+
+An authorized watcher can publish or flag a domain through a versioned feed. Feed entries identify the host, reason, publisher, and expiry. Domain reports govern the wallet's browsing and signing surfaces. The smart account independently enforces transaction rules against the actual on-chain action, including requests submitted directly by an agent. The account owner controls spending limits and can pause or revoke a grant. An opt-in alert worker can relay finalized denial events to Telegram alongside wallet notifications. [NEP-297 events](https://github.com/near/NEPs/blob/master/neps/nep-0297.md) · [Telegram Bot API](https://core.telegram.org/bots/api#sendmessage)
+
+Acceptance cases cover a flagged site opened in the wallet browser, a site flagged after connecting, and a direct agent request above the spending limit. Browser-wide navigation blocking requires an installed extension with the relevant browser permissions. Once the smart account dispatches a transfer, a later pause applies to subsequent dispatches and the earlier transfer can still settle.
+
 ## Extensions
 
 - **Trading adapters.** Add one typed adapter per approved protocol. Each validates the route, input and output assets, maximum input, minimum output, and final recipient, and builds the call itself. Reserve the input and exposure before dispatch, then reconcile actual amounts from the adapter's result.
 - **Fiat-denominated limits.** Require a defined on-chain price source, a quote freshness rule, and a rounding policy.
 - **Signed approvals.** Let the vault owner approve with a NEP-413 message verified on chain against an approval key registered in the vault, bound to the request ID, revisions, and a deadline.
 - **Deterministic vaults.** Deploy vault code once as a global contract by hash, and create each vault at a deterministic account ID derived from its code and initial state.
-- **Smart-account mode.** Run the same mandate checks as a module of a user's smart account, so funds need not move into a separate vault.
 - **Cross-chain execution.** Hold a vault balance in NEAR Intents under the vault's own account and authenticate by predecessor, never by registering an agent key. Contract-enforced swaps need on-chain escrow with fixed parameters. [NEAR Intents](https://docs.near.org/chain-abstraction/intents/overview)
 - **Paid rentals.** Add refunds on early revocation and usage-based billing to the marketplace.
 
