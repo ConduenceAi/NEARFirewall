@@ -360,6 +360,16 @@ A thin Python client exposes the same views and the `execute` call for Python ag
 
 The planned repository layout is `contracts/registry`, `contracts/vault`, `contracts/market`, `packages/sdk`, `packages/cli`, `packages/mcp`, and `apps/marketplace`. Pin dependencies in Cargo and pnpm lockfiles when the packages are created. Supply the network, RPC URL, and contract accounts through the deployment manifest. Wallets keep user signing keys. The agent runtime's function-call key stays in local or CI secret storage, separate from public client configuration.
 
+## Hackathon MVP
+
+Use Meteor as the owner signer through the existing NEAR Connect dApp integration. The demo runs as a web app on NEAR Testnet and uses the published connector. Alice signs the setup transactions to fund the vault and set the agent's grant and mandate. She can sign a pause or revocation from the same app. The agent submits subsequent actions with its own restricted key. [Meteor Wallet SDK](https://github.com/Meteor-Wallet/meteor_wallet_sdk) · [NEAR Connect](https://github.com/fastnear/near-connect)
+
+1. Set a native NEAR limit of 5 NEAR per transfer and 10 NEAR per window for one approved recipient. Leave the optional human approval threshold unset for this demo.
+2. Submit an allowed transfer from the agent and show the settled result. Submit a transfer over the limit and show the vault's denial and unchanged balance. Show the reason in the app using the execution outcome. Telegram can relay the same denial event as a follow-up.
+3. Have Alice pause the vault in Meteor. Submit another action that fits the original limits and verify that the vault blocks it.
+
+The core demo depends on the registry, vault, a restricted agent runner, and the web app. Native Meteor controls and domain blocking remain future wallet integrations. Marketplace, MCP, and the optional approval flow are covered by the broader testnet plan below.
+
 ## Testnet delivery and acceptance
 
 1. **Registry and access.** Alice registers an agent with a restricted executor key and grants Carol `PAUSE | SET_METADATA`. Confirm that Carol cannot grant or resume, that the executor cannot become a grantee, and that an ownership transfer invalidates every earlier grant.
