@@ -4,7 +4,7 @@ This runbook covers running the NEARFirewall demo on NEAR Testnet:
 - **Part A** uses the deployment that already exists.
 - **Part B** sets up a new deployment from scratch.
 
-Every command below was run on Windows (Git Bash) on 2026-11-12, with `cargo-near` 0.23.0 and NEAR CLI (`near`) 0.31.1.
+Every command below was run on Windows on 2026-11-12, with `cargo-near` 0.23.0 and NEAR CLI (`near`) 0.31.1. Part A works the same in PowerShell, cmd, and Bash. Part B's multi-line commands use Bash line continuations (`\`); in PowerShell, put each command on one line.
 
 ## Current deployment
 
@@ -20,13 +20,14 @@ Code hashes are in [`deployments/testnet.json`](../deployments/testnet.json). Th
 
 ## Part A: run the demo
 
-### Once per terminal
+### Setup
 
 ```bash
 cd NEARFirewall
 npm ci                      # first time only
-source scripts/demo.env     # account names and the RPC endpoint; copy from scripts/demo.env.example
 ```
+
+The runner and `scripts/demo-owner.ts` read the account names and the RPC endpoint from `scripts/demo.env` by themselves, so nothing needs sourcing. To start, copy `scripts/demo.env.example` to `scripts/demo.env`. Values already set in the environment take priority.
 
 ### See the current state
 
@@ -56,21 +57,21 @@ Each line prints ✓ when the outcome matches what the scenario expects, togethe
 ```bash
 near tokens <funded-account> send-near $NEARFIREWALL_OWNER '10 NEAR' network-config testnet sign-with-legacy-keychain send
 
-export NEARFIREWALL_AGENT=market-agent-2
+# Change NEARFIREWALL_AGENT in scripts/demo.env to a new handle, such as market-agent-2. Then:
 node scripts/demo-owner.ts setup      # registers the agent and approves the three vendors through the template
 npm run runner -- apps/runner/scenarios/readme-limits.json
 ```
 
 ### Agent tree (scenes 10 and 11)
 
-`desk` and its leaf `bot-1.desk` already exist. The leaf's executor is `nfw-runner1-1112.testnet`, so those runs set `NEARFIREWALL_EXECUTOR` to that account.
+`desk` and its leaf `bot-1.desk` already exist. The leaf has its own executor, so those runs pass `--executor`; the runner loads that account's key from the keychain.
 
 ```bash
-NEARFIREWALL_EXECUTOR=$NEARFIREWALL_LEAF_EXECUTOR npm run runner -- apps/runner/scenarios/tree-1-leaf-pays.json
+npm run runner -- apps/runner/scenarios/tree-1-leaf-pays.json --executor nfw-runner1-1112.testnet
 npm run runner -- apps/runner/scenarios/tree-2-parent-pays.json
-NEARFIREWALL_EXECUTOR=$NEARFIREWALL_LEAF_EXECUTOR npm run runner -- apps/runner/scenarios/tree-3-pool-exhausted.json
+npm run runner -- apps/runner/scenarios/tree-3-pool-exhausted.json --executor nfw-runner1-1112.testnet
 node scripts/demo-owner.ts pause-agent desk
-NEARFIREWALL_EXECUTOR=$NEARFIREWALL_LEAF_EXECUTOR npm run runner -- apps/runner/scenarios/tree-4-branch-paused.json
+npm run runner -- apps/runner/scenarios/tree-4-branch-paused.json --executor nfw-runner1-1112.testnet
 node scripts/demo-owner.ts resume-agent desk
 ```
 
@@ -79,7 +80,7 @@ On 2026-11-12, `bot-1.desk` was transferred to `nfw-vendor3-1112.testnet` for sc
 ### Web app with Meteor (scenes 1, 2, 4, 7)
 
 ```bash
-npm run web:dev      # http://localhost:5173, configured by apps/web/.env.local
+npm run web:dev      # opens on http://localhost:5173 (or the next free port it prints); configured by apps/web/.env.local
 ```
 
 1. **Connect wallet**, then choose Meteor and sign in with your own Testnet account. Create one in Meteor if needed, and fund it with at least 15 NEAR.
@@ -89,7 +90,7 @@ npm run web:dev      # http://localhost:5173, configured by apps/web/.env.local
 5. Run the agent against your account, with your account as the payer:
 
    ```bash
-   NEARFIREWALL_OWNER=<your-account>.testnet NEARFIREWALL_AGENT=<your-handle> npm run runner -- apps/runner/scenarios/readme-limits.json
+   npm run runner -- apps/runner/scenarios/readme-limits.json --payer <your-account>.testnet --agent <your-handle>
    ```
 
 6. **Activity** shows every payment and every blocked attempt, with its reason.
@@ -189,6 +190,7 @@ near contract deploy <you>-registry.testnet use-file target/near/nearfirewall_re
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| `source` is not recognized (PowerShell) | `source` is a Bash command | Not needed: the tools read `scripts/demo.env` themselves |
 | `RPC HTTP 429` | The public RPC is rate-limiting | Use `NEAR_RPC_URL=https://test.rpc.fastnear.com` (the default in `scripts/demo.env`). The SDK retries 429 and 5xx responses with backoff. |
 | `cargo near build` fails at `link.exe` on Windows | The ABI step builds a native DLL | Add `--no-abi` (already in `npm run contracts:build`) |
 | `INSUFFICIENT_BALANCE` | Available balance is the account balance minus code storage, in-flight reservations, and a 0.5 NEAR safety buffer | Top up the payer |

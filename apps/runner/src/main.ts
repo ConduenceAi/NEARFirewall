@@ -6,6 +6,9 @@
  *   node apps/runner/src/main.ts <scenario.json> --preview  dry run with the payer's preview view
  *   node apps/runner/src/main.ts --resolve                  resolve uncertain requests in the journal
  *
+ * Optional flags: --executor <account> (also loads its key from the keychain),
+ * --agent <handle>, --payer <account>. Settings load from scripts/demo.env when present.
+ *
  * Environment: NEARFIREWALL_REGISTRY, NEARFIREWALL_EXECUTOR, NEARFIREWALL_EXECUTOR_KEY
  * (a function-call key restricted to `registry.execute`), NEAR_RPC_URL, NEARFIREWALL_JOURNAL.
  * The key is read from the environment only and is never printed.
@@ -30,6 +33,7 @@ import {
   type PayResult,
   type SubmitExecute,
 } from "@nearfirewall/sdk";
+import { loadDemoEnv } from "./env.ts";
 import { parseScenario, readConfig, substitute, type RunnerConfig, type Scenario } from "./scenario.ts";
 
 class FileJournalStore implements JournalStore {
@@ -188,12 +192,30 @@ async function resolveAll(config: RunnerConfig) {
   }
 }
 
+/** Returns the value after `--name`, if given. */
+function flag(argv: string[], name: string): string | undefined {
+  const i = argv.indexOf(`--${name}`);
+  return i >= 0 ? argv[i + 1] : undefined;
+}
+
 async function main(argv: string[]) {
+  loadDemoEnv();
+  // Flags override the environment, which works the same in every shell.
+  const executor = flag(argv, "executor");
+  if (executor) {
+    process.env.NEARFIREWALL_EXECUTOR = executor;
+    delete process.env.NEARFIREWALL_EXECUTOR_KEY;
+  }
+  const agent = flag(argv, "agent");
+  if (agent) process.env.NEARFIREWALL_AGENT = agent;
+  const payer = flag(argv, "payer");
+  if (payer) process.env.NEARFIREWALL_OWNER = payer;
   const config = readConfig(process.env);
   if (argv.includes("--resolve")) return resolveAll(config);
-  const file = argv.find((a) => !a.startsWith("--"));
+  const valueFlags = new Set(["executor", "agent", "payer"].flatMap((n) => [flag(argv, n)]).filter(Boolean));
+  const file = argv.find((a) => !a.startsWith("--") && !valueFlags.has(a));
   if (!file) {
-    console.error("Usage: main.ts <scenario.json> [--preview] | --resolve");
+    console.error("Usage: main.ts <scenario.json> [--preview] [--executor <account>] [--agent <handle>] [--payer <account>] | --resolve");
     process.exitCode = 2;
     return;
   }

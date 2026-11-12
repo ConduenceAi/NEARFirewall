@@ -38,6 +38,10 @@ import {
   type WalletTransaction,
 } from "@nearfirewall/sdk";
 import { approvedVendors, buildPlan, describeStep, toTransaction, validatePlanLive, type PlanContext } from "@nearfirewall/templates";
+import { loadDemoEnv } from "../apps/runner/src/env.ts";
+
+// Works in PowerShell, cmd, and Bash: settings come from scripts/demo.env unless already set.
+loadDemoEnv();
 
 const env = process.env;
 const need = (name: string) => env[name] ?? fail(`Set ${name}.`);
