@@ -6,20 +6,16 @@ import { href } from "../router.ts";
 export function Topbar({ current }: { current: "home" | "docs" }) {
   return (
     <header className="topbar">
-      <Brand />
-      <nav aria-label="Main">
-        <a href={href("/")} className={current === "home" ? "current" : ""}>
-          Overview
-        </a>
-        <a href={href("/docs")} className={current === "docs" ? "current" : ""}>
-          Docs
-        </a>
-      </nav>
-      <div className="top-actions">
-        <ThemeToggle />
-        <a className="btn primary" href={href("/app/agents")}>
-          Launch app <ArrowRight size={16} />
-        </a>
+      <div className="header-inner">
+        <Brand />
+        <nav className="site-nav" aria-label="Main">
+          <a href={href("/")} aria-current={current === "home" ? "page" : undefined}>Overview</a>
+          <a href={href("/docs")} aria-current={current === "docs" ? "page" : undefined}>Docs</a>
+        </nav>
+        <div className="top-actions">
+          <ThemeToggle />
+          <a className="btn header-launch" href={href("/app/agents")}>Launch app <ArrowRight size={15} /></a>
+        </div>
       </div>
     </header>
   );

@@ -34,7 +34,7 @@ export function PaymentsPanel() {
 
   return (
     <section>
-      <h2>Payments from {accountId}</h2>
+      <h1>Payments</h1>
       {action.message && <p className={`notice ${action.message.kind}`}>{action.message.text}</p>}
       {state.error && <p className="notice error">{state.error}</p>}
       {state.data?.kind === "none" && <EnableCard accountId={accountId} busy={action.busy} exec={exec} />}

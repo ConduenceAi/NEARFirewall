@@ -85,7 +85,8 @@ export function ActivityPanel() {
   if (!accountId) return <p className="muted">Connect a wallet to see activity.</p>;
 
   return (
-    <section aria-label="Activity">
+    <section aria-labelledby="activity-heading">
+      <h1 id="activity-heading">Activity</h1>
       <div className="toolbar">
         <div className="pills" role="group" aria-label="Filter by outcome">
           {FILTERS.map((f) => (

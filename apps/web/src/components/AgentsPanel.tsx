@@ -47,7 +47,7 @@ export function AgentsPanel() {
 
   return (
     <section>
-      <h2>Your agents</h2>
+      <h1>Agents</h1>
       {action.message && <p className={`notice ${action.message.kind}`}>{action.message.text}</p>}
       {agents.error && <p className="notice error">{agents.error}</p>}
       {agents.loading && !agents.data && <p className="muted">Loading…</p>}
@@ -248,7 +248,7 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
   const [freeze, setFreeze] = useState(false);
   return (
     <form
-      className="card"
+      className="card register-form"
       onSubmit={(e) => {
         e.preventDefault();
         onSubmit(
@@ -262,8 +262,8 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
         );
       }}
     >
-      <h3>Register an agent</h3>
-      <p className="hint">
+      <h2 className="form-wide">Register an agent</h2>
+      <p className="hint form-wide">
         The agent is minted to you as an NFT. Its executor is a separate account whose only key can call
         <code> {config.registryId}.execute</code>.
       </p>
@@ -279,7 +279,7 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
       <label>
         Expires in days (optional) <input value={days} onChange={(e) => setDays(e.target.value)} inputMode="numeric" />
       </label>
-      <label>
+      <label className="form-wide">
         Description <input value={description} onChange={(e) => setDescription(e.target.value)} maxLength={512} />
       </label>
       <label className="check">
@@ -288,7 +288,7 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
       <label className="check">
         <input type="checkbox" checked={freeze} onChange={(e) => setFreeze(e.target.checked)} /> Capabilities can only narrow (permanent)
       </label>
-      <button disabled={busy} type="submit">
+      <button className="primary" disabled={busy} type="submit">
         Register
       </button>
     </form>
