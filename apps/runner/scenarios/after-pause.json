@@ -1,0 +1,6 @@
+{
+  "title": "Demo scene 8: run after Alice pauses payments",
+  "payer": "${OWNER}",
+  "agent": "${AGENT}",
+  "steps": [{ "recipient": "${VENDOR1}", "amount": "1", "expect": "PAYMENTS_PAUSED" }]
+}

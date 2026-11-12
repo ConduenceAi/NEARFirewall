@@ -1,0 +1,6 @@
+{
+  "title": "Demo scene 11a: the leaf bot-1.desk pays from the desk branch pool (5 NEAR per day)",
+  "payer": "${OWNER}",
+  "agent": "bot-1.desk",
+  "steps": [{ "label": "leaf", "recipient": "${VENDOR1}", "amount": "3", "expect": "settled" }]
+}

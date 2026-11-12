@@ -1,0 +1,8 @@
+{
+  "name": "@nearfirewall/sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TypeScript client for the NEARFirewall registry and account policy contracts",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": { "zod": "^4.6.7" }
+}

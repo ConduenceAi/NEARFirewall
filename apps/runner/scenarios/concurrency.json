@@ -1,0 +1,6 @@
+{
+  "title": "Simultaneous requests near the daily cap: at most 6 NEAR settles for vendor",
+  "payer": "${OWNER}",
+  "agent": "${AGENT}",
+  "steps": [{ "recipient": "${VENDOR1}", "amount": "3", "parallel": 4 }]
+}

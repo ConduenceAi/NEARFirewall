@@ -1,0 +1,14 @@
+{
+  "title": "Demo scene 6: limits are enforced (vendor 3/6, vendor2 2/4, vendor3 3/6, agent 10 per day)",
+  "payer": "${OWNER}",
+  "agent": "${AGENT}",
+  "steps": [
+    { "label": "first",  "recipient": "${VENDOR1}",   "amount": "2", "expect": "settled" },
+    { "label": "a",      "recipient": "${VENDOR1}",   "amount": "4", "expect": "PER_PAYMENT_CAP" },
+    { "label": "b",      "recipient": "${VENDOR1}",   "amount": "3", "expect": "settled" },
+    { "label": "c",      "recipient": "${VENDOR1}",   "amount": "3", "expect": "RECIPIENT_DAILY_CAP" },
+    { "label": "d",      "recipient": "${VENDOR2}",  "amount": "2", "expect": "settled" },
+    { "label": "e",      "recipient": "${VENDOR2}",  "amount": "2", "expect": "settled" },
+    { "label": "f",      "recipient": "${VENDOR3}",  "amount": "2", "expect": "MANDATE_DAILY_CAP" }
+  ]
+}

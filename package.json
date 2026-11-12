@@ -1,0 +1,21 @@
+{
+  "name": "nearfirewall",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*", "apps/*"],
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "contracts:test": "cargo test --workspace",
+    "contracts:build": "cargo near build non-reproducible-wasm --no-abi --manifest-path contracts/registry/Cargo.toml && cargo near build non-reproducible-wasm --no-abi --manifest-path contracts/account-policy/Cargo.toml",
+    "runner": "node apps/runner/src/main.ts",
+    "web:dev": "npm run dev -w @nearfirewall/web",
+    "web:build": "npm run build -w @nearfirewall/web"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}

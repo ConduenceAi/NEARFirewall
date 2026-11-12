@@ -1,0 +1,13 @@
+{
+  "network": "testnet",
+  "rpcUrl": "https://test.rpc.fastnear.com",
+  "registry": "nfw-registry-1112.testnet",
+  "registryCodeHash": "Hgkuzff54ttMpomBhTGKBjSqgJVeRYeNv1ADfkVU8qwC",
+  "policy": {
+    "codeHash": "BYswoXdW6iiULfmEjUJvb6QpE4PzeC5SphEYvRzbAgPX",
+    "globalCodeHash": null,
+    "wasm": "apps/web/public/nearfirewall_account_policy.wasm"
+  },
+  "abiVersion": "1.0.0",
+  "sourceRevision": "0e40a5d plus uncommitted changes (built 2026-11-12 with cargo-near 0.23.0, --no-abi)"
+}

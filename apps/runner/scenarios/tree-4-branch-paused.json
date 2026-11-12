@@ -1,0 +1,6 @@
+{
+  "title": "Demo scene 11d: after the owner pauses desk, its leaf is blocked by the registry",
+  "payer": "${OWNER}",
+  "agent": "bot-1.desk",
+  "steps": [{ "label": "paused", "recipient": "${VENDOR1}", "amount": "1", "expect": "BRANCH_PAUSED" }]
+}

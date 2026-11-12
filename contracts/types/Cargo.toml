@@ -1,0 +1,11 @@
+[package]
+name = "nearfirewall-types"
+description = "Shared types, reason codes, and limits for the NEARFirewall contracts"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+near-sdk = { workspace = true }
+
+[dev-dependencies]
+near-sdk = { workspace = true, features = ["unit-testing"] }

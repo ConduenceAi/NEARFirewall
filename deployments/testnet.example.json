@@ -1,0 +1,13 @@
+{
+  "network": "testnet",
+  "rpcUrl": "https://rpc.testnet.near.org",
+  "registry": "registry.nearfirewall.testnet",
+  "registryCodeHash": "<base58 code hash reported by view_account for the registry>",
+  "policy": {
+    "codeHash": "<base58 code hash of the account policy WASM>",
+    "globalCodeHash": null,
+    "wasm": "apps/web/public/nearfirewall_account_policy.wasm"
+  },
+  "abiVersion": "1.0.0",
+  "sourceRevision": "<git commit the WASM was built from>"
+}

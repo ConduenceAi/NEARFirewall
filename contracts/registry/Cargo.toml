@@ -1,0 +1,14 @@
+[package]
+name = "nearfirewall-registry"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk = { workspace = true }
+nearfirewall-types = { workspace = true }
+near-contract-standards = { workspace = true }
+[dev-dependencies]
+near-sdk = { workspace = true, features = ["unit-testing"] }

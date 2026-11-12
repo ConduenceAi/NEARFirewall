@@ -30,3 +30,14 @@ docs/demo.md
 *.log
 .DS_Store
 Thumbs.db
+
+# Rust build outputs and local runner state
+target/
+.runner/
+
+# Web app build output and copied contract WASM
+apps/web/public/*.wasm
+apps/web/.env.local
+
+# Local demo configuration
+scripts/demo.env

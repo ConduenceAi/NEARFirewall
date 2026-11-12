@@ -1,0 +1,6 @@
+{
+  "title": "Demo scene 11b: the parent desk pays from the same pool",
+  "payer": "${OWNER}",
+  "agent": "desk",
+  "steps": [{ "label": "parent", "recipient": "${VENDOR2}", "amount": "2", "expect": "settled" }]
+}

@@ -10,22 +10,22 @@ This plan builds the system described in the [README](../README.md), one phase a
 
 ## Phase overview
 
-| Phase | Goal | Depends on | Release |
-| --- | --- | --- | --- |
-| 0 | Repository, shared types, CI, and Testnet spikes | — | Hackathon |
-| 1 | Registry core: agent NFT, executor, generation, expiry, locks, `execute` | 0 | Hackathon |
-| 2 | Account policy contract on the owner's account | 0 | Hackathon |
-| 3 | Agent tree and branch mandates | 1, 2 | Hackathon |
-| 4 | Records on agent tokens | 1 | Hackathon |
-| 5 | TypeScript SDK, templates, and `validate` | 0 (types); 1–4 for live tests | Hackathon |
-| 6 | Agent runner | 5 | Hackathon |
-| 7 | Web app | 5 | Hackathon |
-| 8 | Testnet deployment and demo | 1–7 | Hackathon |
-| 9 | CLI and MCP server | 5 | After |
-| 10 | Payment rule extensions | 8 | After |
-| 11 | Team roles and payroll | 8 | After |
-| 12 | Actions, subscriptions, and integrations | 10 | After |
-| 13 | Hardening, audit, and mainnet | 9–12 | After |
+| Phase | Goal | Depends on | Release | Status (2026-11-12) |
+| --- | --- | --- | --- | --- |
+| 0 | Repository, shared types, CI, and Testnet spikes | — | Hackathon | Repository and shared types done. CI workflow written but not yet run on GitHub. Spikes S1–S5 not run |
+| 1 | Registry core: agent NFT, executor, generation, expiry, locks, `execute` | 0 | Hackathon | Implemented, 39 unit tests |
+| 2 | Account policy contract on the owner's account | 0 | Hackathon | Implemented, 33 unit tests |
+| 3 | Agent tree and branch mandates | 1, 2 | Hackathon | Implemented; covered by the phase 1 and 2 tests |
+| 4 | Records on agent tokens | 1 | Hackathon | Implemented; covered by the phase 1 tests |
+| 5 | TypeScript SDK, templates, and `validate` | 0 (types); 1–4 for live tests | Hackathon | Implemented, 25 tests against a mocked RPC |
+| 6 | Agent runner | 5 | Hackathon | Implemented, 3 tests. Not yet run against a chain |
+| 7 | Web app | 5 | Hackathon | Implemented; type-checks and builds. Not yet used with a wallet |
+| 8 | Testnet deployment and demo | 1–7 | Hackathon | Not started; see the [runbook](testnet-runbook.md) |
+| 9 | CLI and MCP server | 5 | After | Not started |
+| 10 | Payment rule extensions | 8 | After | Not started |
+| 11 | Team roles and payroll | 8 | After | Not started |
+| 12 | Actions, subscriptions, and integrations | 10 | After | Not started |
+| 13 | Hardening, audit, and mainnet | 9–12 | After | Not started |
 
 ```text
 Phase 0 ──┬── Phase 1 ──┬── Phase 3 ──┐
@@ -86,8 +86,11 @@ pub struct ExecContext {
     pub expected_revision: Option<u64>,
 }
 
+/// The transaction's final value. A routed request resolves to the value of
+/// `on_settle`, so the executor reads the result from the transaction itself.
 pub enum Outcome {
-    Reserved { request_id: String },   // transfer dispatched, settlement pending
+    Settled { request_id: String },
+    Failed { request_id: String },     // dispatched, transfer failed, reservation released
     Denied { reason: Reason, detail: Option<String> },
 }
 ```
@@ -105,8 +108,8 @@ Denials are returned as `Outcome::Denied` and emitted as events; they do not pan
 
 ### Events (NEP-297, standard `nearfirewall`, version `1.0.0`)
 
-- **Registry:** `agent_registered`, `agent_child_created`, `agent_removed`, `executor_changed`, `agent_paused`, `agent_resumed`, `capabilities_set`, `expiry_extended`, `locks_burned`, `record_set`, `record_removed`, `execution_routed`, `execution_denied`. The NFT standard's own `nft_mint`, `nft_transfer`, and `nft_burn` events are emitted as well.
-- **Account policy:** `policy_initialized`, `mandate_set`, `mandate_revoked`, `recipient_approved`, `recipient_removed`, `payments_paused`, `payments_resumed`, `payment_reserved`, `payment_settled`, `payment_failed`, `payment_denied`.
+- **Registry:** `agent_registered` (with `parent` set for children), `generation_advanced` (on transfer), `agent_removed`, `executor_changed`, `agent_paused`, `agent_resumed`, `capabilities_set`, `expiry_extended`, `locks_burned`, `record_set`, `record_removed`, `execution_routed`, `execution_denied`. The NFT standard's own `nft_mint`, `nft_transfer`, and `nft_burn` events are emitted as well.
+- **Account policy:** `policy_initialized`, `mandate_set`, `mandate_revoked`, `recipient_approved`, `recipient_removed`, `payments_paused`, `payments_resumed`, `account_cap_set`, `payment_reserved`, `payment_settled`, `payment_failed`, `payment_denied`.
 
 ---
 
@@ -130,6 +133,17 @@ Denials are returned as `Outcome::Denied` and emitted as events; they do not pan
 | S5 | What is the gas cost of `execute` → `on_execute` → transfer → `on_settle` with an 8-node path? | Lower `MAX_DEPTH` if needed. |
 
 **Exit criteria:** CI green on an empty build. Shared types merged. Results of S1–S5 recorded, and each fallback decision made.
+
+**Findings so far (2026-11-12):**
+- **Build tooling.** near-sdk 5.30 compiles only through `cargo near build` (which sets `--cfg near`) or in unit-test mode. The unit-test mode builds `aws-lc-sys`, which needs NASM on Windows; `.cargo/config.toml` sets `AWS_LC_SYS_PREBUILT_NASM=1` to avoid that.
+- **Sandbox.** NEAR Sandbox (`near-workspaces`) does not run on Windows. The cross-contract tests planned for C3 have to run on Linux or macOS, for example in CI.
+- **WASM size.** With plain `cargo build --release --cfg near`, the policy is about 440 KB and the registry about 610 KB, before `cargo-near`'s optimization. Deploying the policy directly would lock roughly 2–4 NEAR on the user's account for storage, depending on the optimized size. That makes S2 (global contract) the preferred path.
+- **Wallet connector.** NEAR Connect (`@fastnear/near-connect` 0.14) accepts `DeployContract` and `UseGlobalContract` actions in its connector format. Whether Meteor signs them is still S1 and S2.
+- **Locally stored keys.** NEAR Connect can keep a function-call key in local storage and sign zero-deposit calls without a prompt. Every owner write attaches 1 yoctoNEAR, so it always prompts. The app never adds such a key.
+- **Testnet run.** Deployed on 2026-11-12. The registry is `nfw-registry-1112.testnet` and the demo payer is `nfw-alice-1112.testnet`; see `deployments/testnet.json` and the [runbook](testnet-runbook.md).
+  - S3 and S4 are confirmed. S1 and S2 still need Meteor in a browser.
+  - With `cargo near build --no-abi`, the policy is 238 KB and the registry 331 KB. The policy locks about 2.4 NEAR on the payer's account.
+  - `cargo-near`'s ABI step fails to link on Windows, which is why builds use `--no-abi`.
 
 ## Phase 1: Registry core
 
@@ -166,7 +180,7 @@ Denials are returned as `Outcome::Denied` and emitted as events; they do not pan
    - `burn_locks`: bits can only be added.
 5. **`execute(payer, agent_id, grant_id, action, request_id, expected_revision)`.**
    - Check that the caller is the executor, the agent is active and not expired, the action is allowed, and the amount is within the cap.
-   - Check that the payer is the holder of a node on the path. Grants for other payers come in Phase 11; `grant_id` stays `Option` and is rejected if set.
+   - Check that the payer holds the requesting agent itself. Holding an ancestor is not enough, because a branch mandate does not track its descendants' generations; without this, a transferred leaf could keep spending from the previous holder's branch budget (found during the Testnet demo, fixed 2026-11-12). Grants for other payers come in Phase 11; `grant_id` stays `Option` and is rejected if set.
    - Build the `ExecContext` and call `payer.on_execute` with a fixed gas budget sized from S5.
    - On a registry-side denial, return `Denied`, emit `execution_denied`, and write a bounded per-agent activity entry (see item 7).
 6. **Views:** `resolve(handle)`, `get_agent(id)`, `get_path(id)`, plus the standard NFT views.

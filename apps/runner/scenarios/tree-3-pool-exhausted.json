@@ -1,0 +1,6 @@
+{
+  "title": "Demo scene 11c: the pool is at 5 of 5, so the leaf is blocked even though the vendor's own limit has room",
+  "payer": "${OWNER}",
+  "agent": "bot-1.desk",
+  "steps": [{ "label": "over", "recipient": "${VENDOR1}", "amount": "1", "expect": "MANDATE_DAILY_CAP" }]
+}

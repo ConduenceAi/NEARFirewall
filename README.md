@@ -2,7 +2,7 @@
 
 NEARFirewall registers agents and lets a user authorize them to pay from the user's existing NEAR account. Each recipient approval includes its own spending limits. Payments that fit the recipient's limits and the agent's overall budget execute automatically. The account that already holds the funds runs the policy and sends the payment.
 
-**Status:** Implementation specification. The first deployment target is NEAR Testnet.
+**Status:** Hackathon build in progress. The contracts, SDK, templates, runner, and web app are implemented and unit-tested. They have not been deployed yet. The first deployment target is NEAR Testnet; see the [Testnet runbook](docs/testnet-runbook.md).
 
 ## Hackathon MVP
 
@@ -45,7 +45,7 @@ The agent's runtime key lives on its executor account and is restricted to a zer
 
 ### Agent tree
 
-An agent token can have a parent agent token. The owner registers a top-level agent. Its holder can create child agents under it. The agent that actually performs a task is usually a leaf. Each child is its own token with its own executor, minted to the parent's holder. A child transferred to another holder stays under its parent's control.
+An agent token can have a parent agent token. The owner registers a top-level agent. Its holder can create child agents under it. The agent that actually performs a task is usually a leaf. Each child is its own token with its own executor, minted to the parent's holder. A child transferred to another holder stays under its parent's control. It can no longer spend from the previous holder's account: the registry routes a payment only when the payer holds the agent making the request.
 
 - **Children only narrow.** A child inherits its parent's capability rules and expiry and can only narrow them: fewer actions, lower per-action caps, an earlier expiry. The registry checks this when a node is created or edited. Each execution also checks the action against every node on the path, so narrowing a parent immediately narrows its whole branch.
 - **Fixed ancestry.** The registry stores each node's ancestor list at creation, up to a maximum depth of 8. Nodes never move. To move an agent, create a new token under the new parent.
@@ -157,7 +157,7 @@ The deployment manifest records the network, registry address, expected account-
 | Contracts and events | Rust, Cargo, WASM, `near-sdk`, `near-contract-standards` for the NFT standard, Borsh state, Serde JSON, NEP-297. [NEAR Rust SDK](https://github.com/near/near-sdk-rs) · [near-contract-standards](https://github.com/near/near-sdk-rs/tree/master/near-contract-standards) · [NEP-297](https://github.com/near/NEPs/blob/master/neps/nep-0297.md) |
 | Deploy and verify | `cargo-near`, NEAR CLI, and NEAR Testnet. [cargo-near](https://github.com/near/cargo-near) · [NEAR CLI](https://github.com/near/near-cli-rs) |
 | Wallet and web app | React, Vite, TypeScript, Meteor through `@fastnear/near-connect`. [React](https://react.dev/learn) · [Vite](https://vite.dev/guide/) · [NEAR Connect](https://github.com/fastnear/near-connect) |
-| SDK and runner | Node.js, TypeScript, pnpm workspaces, Zod, `near-api-js` and NEAR JSON-RPC. Commander for the CLI. [near-api-js](https://github.com/near/near-api-js) · [pnpm workspaces](https://pnpm.io/workspaces) · [Zod](https://zod.dev/) · [Commander](https://github.com/tj/commander.js) |
+| SDK and runner | Node.js 24 (runs TypeScript directly), TypeScript, npm workspaces (a pnpm workspace file is included), Zod, `near-api-js` for the runner's signing, and NEAR JSON-RPC. Commander for the CLI. [near-api-js](https://github.com/near/near-api-js) · [npm workspaces](https://docs.npmjs.com/cli/using-npm/workspaces) · [Zod](https://zod.dev/) · [Commander](https://github.com/tj/commander.js) |
 | Verification | Rust unit tests, `near-workspaces` with NEAR Sandbox, Vitest, Playwright, GitHub Actions. [NEAR Sandbox testing](https://docs.near.org/smart-contracts/testing/integration-test) · [near-workspaces](https://github.com/near/near-workspaces-rs) · [Vitest](https://vitest.dev/guide/) · [Playwright](https://playwright.dev/docs/intro) · [GitHub Actions](https://docs.github.com/en/actions) |
 | Follow-up integrations | Model Context Protocol TypeScript SDK over stdio and Telegram Bot API. [MCP TypeScript SDK](https://github.com/modelcontextprotocol/typescript-sdk) · [Telegram Bot API](https://core.telegram.org/bots/api) |
 
@@ -191,7 +191,27 @@ A future approval for a service such as Polymarket would bind the policy to the 
 
 ## Repository
 
+```text
+contracts/types            shared Rust types: actions, capabilities, reason codes, ExecContext, Outcome
+contracts/registry         agent NFT, tree, locks, records, execute router
+contracts/account-policy   policy contract deployed on payer accounts
+packages/sdk               TypeScript client, owner transaction builders, executor client, operation journal
+packages/templates         templates, plans, and validate()
+apps/runner                agent runner and demo scenarios
+apps/web                   web app (React, Vite, NEAR Connect)
+deployments                deployment manifests
+docs                       implementation plan and Testnet runbook
+```
+
 ```bash
 git clone https://github.com/ConduenceAi/NEARFirewall.git
 cd NEARFirewall
+cargo test --workspace          # contract unit tests
+npm ci
+npm test                        # SDK, templates, runner tests
+npm run typecheck
+npm run web:dev                 # web app on http://localhost:5173
+npm run runner -- apps/runner/scenarios/readme-limits.json --preview
 ```
+
+Building deployable WASM needs `cargo-near` (`npm run contracts:build`). On Windows, `.cargo/config.toml` lets the contract unit tests build without NASM. The [Testnet runbook](docs/testnet-runbook.md) covers accounts, deployment, the restricted executor key, and running the demo.

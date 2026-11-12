@@ -1,0 +1,6 @@
+{
+  "title": "Demo scene 10: after the owner transfers the leaf token, it can no longer spend from the owner's account",
+  "payer": "${OWNER}",
+  "agent": "bot-1.desk",
+  "steps": [{ "label": "after", "recipient": "${VENDOR1}", "amount": "1", "expect": "PAYER_NOT_AUTHORIZED" }]
+}

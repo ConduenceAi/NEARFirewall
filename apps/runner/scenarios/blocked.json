@@ -1,0 +1,10 @@
+{
+  "title": "Demo scenes 3 and 9: unapproved recipient, and a reused request ID",
+  "payer": "${OWNER}",
+  "agent": "${AGENT}",
+  "steps": [
+    { "label": "attack", "recipient": "${ATTACKER}", "amount": "1", "expect": "RECIPIENT_NOT_APPROVED" },
+    { "label": "pay",    "recipient": "${VENDOR1}",   "amount": "1", "expect": "settled" },
+    { "label": "replay", "recipient": "${VENDOR1}",   "amount": "1", "duplicateOf": "pay", "expect": "settled" }
+  ]
+}
