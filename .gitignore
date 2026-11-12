@@ -22,6 +22,10 @@ coverage/
 Pods/
 local.properties
 
+# Local research notes
+docs/architecture-research.md
+docs/demo.md
+
 # Local tooling and operating system files
 *.log
 .DS_Store
