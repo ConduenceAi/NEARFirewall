@@ -7,7 +7,7 @@
  *   node apps/runner/src/main.ts --resolve                  resolve uncertain requests in the journal
  *
  * Optional flags: --executor <account> (also loads its key from the keychain),
- * --agent <handle>, --payer <account>. Settings load from scripts/demo.env when present.
+ * --agent <handle>, --payer <account>, --registry <account>. Settings load from scripts/demo.env when present.
  *
  * Environment: NEARFIREWALL_REGISTRY, NEARFIREWALL_EXECUTOR, NEARFIREWALL_EXECUTOR_KEY
  * (a function-call key restricted to `registry.execute`), NEAR_RPC_URL, NEARFIREWALL_JOURNAL.
@@ -136,7 +136,7 @@ async function run(scenario: Scenario, config: RunnerConfig, preview: boolean) {
     for (const step of scenario.steps) {
       const result = await policy.preview({
         path,
-        executor: agent.executor,
+        executor: agent.executor ?? scenario.payer,
         action: { type: "TransferNear", recipient: step.recipient, amount: parseNear(step.amount) },
         requestId: newRequestId(),
       });
@@ -210,12 +210,14 @@ async function main(argv: string[]) {
   if (agent) process.env.NEARFIREWALL_AGENT = agent;
   const payer = flag(argv, "payer");
   if (payer) process.env.NEARFIREWALL_OWNER = payer;
+  const registry = flag(argv, "registry");
+  if (registry) process.env.NEARFIREWALL_REGISTRY = registry;
   const config = readConfig(process.env);
   if (argv.includes("--resolve")) return resolveAll(config);
-  const valueFlags = new Set(["executor", "agent", "payer"].flatMap((n) => [flag(argv, n)]).filter(Boolean));
+  const valueFlags = new Set([executor, agent, payer, registry].filter(Boolean));
   const file = argv.find((a) => !a.startsWith("--") && !valueFlags.has(a));
   if (!file) {
-    console.error("Usage: main.ts <scenario.json> [--preview] [--executor <account>] [--agent <handle>] [--payer <account>] | --resolve");
+    console.error("Usage: main.ts <scenario.json> [--preview] [--executor <account>] [--agent <handle>] [--payer <account>] [--registry <account>] | --resolve");
     process.exitCode = 2;
     return;
   }

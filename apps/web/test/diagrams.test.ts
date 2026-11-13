@@ -1,9 +1,9 @@
 import { createElement, Fragment } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { CheckLadder, GenerationBinding, PaymentLifecycle, SystemOverview } from "../src/components/diagrams/index.ts";
+import { CheckLadder, ConnectedPayment, GenerationBinding, PaymentLifecycle, SystemOverview } from "../src/components/diagrams/index.ts";
 
-const svgFigures = { SystemOverview, PaymentLifecycle, GenerationBinding };
+const svgFigures = { SystemOverview, PaymentLifecycle, GenerationBinding, ConnectedPayment };
 
 describe("docs diagrams", () => {
   for (const [name, Figure] of Object.entries(svgFigures)) {

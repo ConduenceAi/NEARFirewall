@@ -13,6 +13,7 @@ export interface AccountState {
   amount: bigint;
   locked: bigint;
   codeHash: string;
+  globalContractAccountId?: string;
   storageUsage: number;
 }
 
@@ -89,12 +90,46 @@ export class NearRpc {
   }
 
   async viewAccount(accountId: string): Promise<AccountState> {
-    const r = await this.call<{ amount: string; locked: string; code_hash: string; storage_usage: number }>("query", {
+    const r = await this.call<{
+      amount: string;
+      locked: string;
+      code_hash: string;
+      global_contract_hash?: string;
+      global_contract_account_id?: string;
+      storage_usage: number;
+    }>("query", {
       request_type: "view_account",
       finality: "final",
       account_id: accountId,
     });
-    return { amount: BigInt(r.amount), locked: BigInt(r.locked), codeHash: r.code_hash, storageUsage: r.storage_usage };
+    return {
+      amount: BigInt(r.amount),
+      locked: BigInt(r.locked),
+      codeHash: r.global_contract_hash ?? r.code_hash,
+      globalContractAccountId: r.global_contract_account_id,
+      storageUsage: r.storage_usage,
+    };
+  }
+
+  /** Public keys on an account, with whether each is full access. */
+  async viewAccessKeys(accountId: string): Promise<{ publicKey: string; fullAccess: boolean; receiverId?: string; methodNames?: string[]; allowance?: bigint | null }[]> {
+    const r = await this.call<{ keys: { public_key: string; access_key: { permission: unknown } }[] }>("query", {
+      request_type: "view_access_key_list",
+      finality: "final",
+      account_id: accountId,
+    });
+    return r.keys.map((k) => {
+      const permission = k.access_key.permission as "FullAccess" | { FunctionCall: { receiver_id: string; method_names: string[]; allowance: string | null } };
+      return permission === "FullAccess"
+        ? { publicKey: k.public_key, fullAccess: true }
+        : {
+          publicKey: k.public_key,
+          fullAccess: false,
+          receiverId: permission.FunctionCall.receiver_id,
+          methodNames: permission.FunctionCall.method_names,
+          allowance: permission.FunctionCall.allowance == null ? null : BigInt(permission.FunctionCall.allowance),
+        };
+    });
   }
 
   /** Returns true when the account exists. */

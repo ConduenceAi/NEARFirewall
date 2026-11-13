@@ -1,12 +1,13 @@
 import { useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { describeReason } from "@nearfirewall/sdk";
-import { config, policyOf, registry } from "../config.ts";
+import { policyOf } from "../config.ts";
+import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { near, timeText } from "../format.ts";
 import { useAsync } from "../hooks.ts";
 import { useWallet } from "../wallet.tsx";
 
-type Kind = "paid" | "blocked" | "registry" | "failed";
+type Kind = "paid" | "blocked" | "registry" | "failed" | "awaiting";
 
 interface Entry {
   key: string;
@@ -16,6 +17,7 @@ interface Entry {
   amount: bigint;
   kind: Kind;
   detail: string;
+  connection?: string;
 }
 
 const FILTERS: { id: "all" | Kind; label: string; tone: "lime" | "sky" | "coral" }[] = [
@@ -24,9 +26,19 @@ const FILTERS: { id: "all" | Kind; label: string; tone: "lime" | "sky" | "coral"
   { id: "blocked", label: "Blocked", tone: "coral" },
   { id: "registry", label: "Registry", tone: "coral" },
   { id: "failed", label: "Failed", tone: "sky" },
+  { id: "awaiting", label: "Awaiting confirmation", tone: "sky" },
 ];
 
-const DOT: Record<Kind, string> = { paid: "", blocked: "denied", registry: "denied", failed: "failed" };
+const DOT: Record<Kind, string> = { paid: "", blocked: "denied", registry: "denied", failed: "failed", awaiting: "failed" };
+
+const POLICY_OUTCOMES = {
+  settled: { kind: "paid", detail: "Paid" },
+  denied: { kind: "blocked", detail: "Denied" },
+  failed: { kind: "failed", detail: "Transfer failed. The reservation was released." },
+  awaiting: { kind: "awaiting", detail: "Waiting for owner confirmation" },
+  declined: { kind: "blocked", detail: "Declined by the owner" },
+  expired: { kind: "blocked", detail: "Confirmation expired" },
+} as const;
 
 /**
  * Settled and blocked attempts, read from the bounded activity logs that both
@@ -34,13 +46,16 @@ const DOT: Record<Kind, string> = { paid: "", blocked: "denied", registry: "deni
  */
 export function ActivityPanel() {
   const { accountId } = useWallet();
+  const { registry, policyCodeHash } = useWorkspaceRegistry();
   const [filter, setFilter] = useState<"all" | Kind>("all");
   const [agentFilter, setAgentFilter] = useState<string>("all");
 
   const data = useAsync(async () => {
     if (!accountId) return [] as Entry[];
-    const state = await policyOf(accountId).state(config.policyCodeHash);
-    const payments = state.kind === "enabled" ? await policyOf(accountId).getActivity(64) : [];
+    const policy = policyOf(accountId);
+    const state = await policy.state(policyCodeHash);
+    const view = state.kind === "enabled" ? await policy.getPolicy() : null;
+    const payments = view?.registry === registry.registryId ? await policy.getActivity(64) : [];
     const agents = await registry.agentsOf(accountId);
     const handles = new Map(agents.map((a) => [a.agent_id, a.handle]));
     const routed = await Promise.all(
@@ -53,13 +68,9 @@ export function ActivityPanel() {
       agent: handles.get(p.leaf) ?? `#${p.leaf}`,
       recipient: p.recipient,
       amount: p.amount,
-      kind: p.outcome === "settled" ? "paid" : p.outcome === "denied" ? "blocked" : "failed",
-      detail:
-        p.outcome === "settled"
-          ? "Paid"
-          : p.outcome === "denied" && p.reason
-            ? describeReason(p.reason)
-            : "The transfer failed and the reservation was released",
+      ...POLICY_OUTCOMES[p.outcome],
+      detail: p.outcome === "denied" && p.reason ? describeReason(p.reason) : POLICY_OUTCOMES[p.outcome].detail,
+      connection: p.via?.kind === "connection" ? [p.via.label, p.client].filter(Boolean).join(" · ") : undefined,
     }));
     for (const e of routed.flat()) {
       if (e.outcome !== "denied") continue;
@@ -74,7 +85,7 @@ export function ActivityPanel() {
       });
     }
     return entries.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
-  }, [accountId]);
+  }, [accountId, registry, policyCodeHash]);
 
   const all = data.data ?? [];
   const agentNames = useMemo(() => [...new Set(all.map((e) => e.agent))].sort(), [all]);
@@ -85,7 +96,7 @@ export function ActivityPanel() {
   if (!accountId) return <p className="muted">Connect a wallet to see activity.</p>;
 
   return (
-    <section aria-labelledby="activity-heading">
+    <section className="activity-panel" aria-labelledby="activity-heading">
       <h1 id="activity-heading" className="visually-hidden">Activity</h1>
       <div className="toolbar">
         <div className="pills" role="group" aria-label="Filter by outcome">
@@ -126,7 +137,7 @@ export function ActivityPanel() {
                 {e.agent} → {e.recipient}
               </span>
               <span className="amount">{near(e.amount)}</span>
-              <span className="sub">{e.kind === "registry" ? `Blocked by the registry: ${e.detail}` : e.kind === "blocked" ? `Blocked: ${e.detail}` : e.detail}</span>
+              <span className="sub">{e.kind === "registry" ? `Blocked by the registry: ${e.detail}` : e.detail}{e.connection && ` · ${e.connection}`}</span>
               <span className="when">{timeText(e.at)}</span>
             </li>
           ))}

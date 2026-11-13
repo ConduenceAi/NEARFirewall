@@ -1,10 +1,21 @@
 # Testnet runbook
 
-This runbook covers running the NEARFirewall demo on NEAR Testnet:
-- **Part A** uses the deployment that already exists.
-- **Part B** sets up a new deployment from scratch.
+Use the owner-registry flow below for a fresh setup. Parts A and B document the original shared-registry demo and require its contract version.
 
-Every command below was run on Windows on 2026-11-12, with `cargo-near` 0.23.0 and NEAR CLI (`near`) 0.31.1. Part A works the same in PowerShell, cmd, and Bash. Part B's multi-line commands use Bash line continuations (`\`); in PowerShell, put each command on one line.
+The dashboard recognizes wallets whose deployed payment policy already trusts the original shared Testnet registry. It opens that registry with the wallet's existing agents, approvals, and activity.
+
+The original demo commands were run on Windows on 2026-11-12 with `cargo-near` 0.23.0 and NEAR CLI 0.31.1. Part A works in PowerShell, cmd, and Bash. Part B uses Bash line continuations (`\`).
+
+## Fresh owner registry and local MCP
+
+1. Use a fresh named Testnet account with enough NEAR for storage and the planned payments. The two direct contract deployments require roughly 7 NEAR for code and registry storage before payment funds.
+2. Run `npm ci` and `npm run contracts:build`. Copy both `target/near/*/*.wasm` files to `apps/web/public/`. Copy `apps/web/.env.example` to `apps/web/.env.local` and leave `VITE_REGISTRY_ID` empty. If you pin the hashes, use the Base58 checksums from your build.
+3. Run `npm run web:dev`. Connect the owner wallet, choose **Create my registry**, register an agent, and enable payments. Leave the executor field empty for local MCP.
+4. Under **Payments**, approve a Testnet recipient. For example, use an agent cap of 5 NEAR, a recipient cap of 5 NEAR, and an **Ask me first** threshold of 4 NEAR. Allow room in the daily budgets for both test payments.
+5. From Agents or the map, choose **Connect**, pick a local client and sign the restricted-key transaction. Use the configuration in the panel to launch the local MCP server. Verify `get_rules`, request 2 NEAR to the approved recipient, and request 4.5 NEAR to exercise **Ask me first**.
+6. Confirm or decline the waiting payment in **Payments**. Select the connection in the agent map and choose **Disconnect key**. Check that the local client can no longer submit a payment.
+
+The handoff recorded the Testnet flow using the CLI and local MCP on `nfw-owner-1113.testnet`, with the key subsequently deleted. The dashboard has been exercised with a mock wallet. A fresh signed Meteor walkthrough and global-contract publication are pending.
 
 ## Current deployment
 
@@ -96,6 +107,8 @@ npm run web:dev      # opens on http://localhost:5173 (or the next free port it 
 6. **Activity** shows every payment and every blocked attempt, with its reason.
 
 ## Part B: set up a new deployment
+
+The commands in Part B target the original shared-registry contracts. Use the source revision in the [original deployment manifest](../deployments/testnet.json) if you need to reproduce that deployment.
 
 ### B1. Tools
 

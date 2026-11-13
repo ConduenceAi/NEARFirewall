@@ -1,42 +1,56 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   approveRecipient,
+  confirmPayment,
+  declinePayment,
+  describeReason,
   enablePayments,
+  expirePayment,
   parseNear,
   pausePayments,
   removeRecipient,
   resumePayments,
   revokeMandate,
   setAccountDailyCap,
+  setConfirmAbove,
   setMandate,
   type AgentView,
   type Mandate,
   type PathNode,
+  Outcome,
   type PolicyClient,
   type WalletTransaction,
 } from "@nearfirewall/sdk";
-import { config, policyOf, registry } from "../config.ts";
+import { config, policyOf } from "../config.ts";
+import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { ensureOk, near, timeText } from "../format.ts";
 import { useAction, useAsync } from "../hooks.ts";
 import { useWallet } from "../wallet.tsx";
 import { VendorsWizard } from "./VendorsWizard.tsx";
 
-export function PaymentsPanel() {
+type Execute = (label: string, tx: WalletTransaction | (() => WalletTransaction | Promise<WalletTransaction>), handle?: (value: unknown) => void) => Promise<boolean>;
+
+export function PaymentsPanel({ onPendingChanged }: { onPendingChanged(): void }) {
   const { accountId, send } = useWallet();
+  const { policyCodeHash } = useWorkspaceRegistry();
   const action = useAction();
   const state = useAsync(
-    () => (accountId ? policyOf(accountId).state(config.policyCodeHash) : Promise.resolve(null)),
-    [accountId, action.busy],
+    () => (accountId ? policyOf(accountId).state(policyCodeHash) : Promise.resolve(null)),
+    [accountId, action.busy, policyCodeHash],
   );
 
   if (!accountId) return <p className="muted">Connect a wallet to manage payments.</p>;
-  const exec = (label: string, tx: WalletTransaction) => action.run(label, async () => ensureOk(await send(tx)));
+  const exec: Execute = (label, tx, handle) => action.run(label, async () => {
+    const result = ensureOk(await send(typeof tx === "function" ? await tx() : tx));
+    handle?.(result.value);
+  });
 
   return (
     <section>
       <h1 className="visually-hidden">Payments</h1>
       {action.message && <p className={`notice ${action.message.kind}`}>{action.message.text}</p>}
       {state.error && <p className="notice error">{state.error}</p>}
+      {!state.data && !state.error && <p role="status">Checking your payment policy…</p>}
       {state.data?.kind === "none" && <EnableCard accountId={accountId} busy={action.busy} exec={exec} />}
       {state.data?.kind === "other" && (
         <p className="notice error">
@@ -44,29 +58,32 @@ export function PaymentsPanel() {
           Use an account without a contract.
         </p>
       )}
-      {state.data?.kind === "enabled" && <Policy policy={policyOf(accountId)} busy={action.busy} exec={exec} />}
+      {state.data?.kind === "enabled" && <Policy policy={policyOf(accountId)} busy={action.busy} exec={exec} onPendingChanged={onPendingChanged} />}
     </section>
   );
 }
 
-function EnableCard({ accountId, busy, exec }: { accountId: string; busy: boolean; exec: (l: string, tx: WalletTransaction) => Promise<boolean> }) {
+function EnableCard({ accountId, busy, exec }: { accountId: string; busy: boolean; exec: Execute }) {
   const [cap, setCap] = useState("");
-  const enable = async () => {
+  const { registry: { registryId } } = useWorkspaceRegistry();
+  const enable = () => exec("Enable payments", async () => {
     const accountCap = cap ? parseNear(cap) : null;
     if (config.policyGlobalCodeHash) {
-      return exec("Enable payments", enablePayments(accountId, config.registryId, { globalCodeHash: config.policyGlobalCodeHash }, accountCap));
+      return enablePayments(accountId, registryId, { globalCodeHash: config.policyGlobalCodeHash }, accountCap);
     }
     const response = await fetch(config.policyWasmUrl);
-    if (!response.ok) throw new Error(`Could not load the policy WASM from ${config.policyWasmUrl}`);
+    if (!response.ok || response.headers.get("content-type")?.includes("text/html")) {
+      throw new Error("Policy WASM is unavailable. Run the contract build and copy the WASM into apps/web/public.");
+    }
     const code = new Uint8Array(await response.arrayBuffer());
-    return exec("Enable payments", enablePayments(accountId, config.registryId, { code }, accountCap));
-  };
+    return enablePayments(accountId, registryId, { code }, accountCap);
+  });
   return (
     <div className="card" id="enable-payments">
       <h3>Enable agent payments on your account</h3>
       <p>
         This installs the NEARFirewall payment policy on <strong>{accountId}</strong> and connects it to the registry
-        <code> {config.registryId}</code>. Your address and balance stay the same. Agents can then pay only the recipients
+        <code> {registryId}</code>. Agents can then pay only the recipients
         you approve, within the limits you set. You keep full control of your account.
       </p>
       {!config.policyGlobalCodeHash && (
@@ -83,12 +100,16 @@ function EnableCard({ accountId, busy, exec }: { accountId: string; busy: boolea
   );
 }
 
-function Policy({ policy, busy, exec }: { policy: PolicyClient; busy: boolean; exec: (l: string, tx: WalletTransaction) => Promise<boolean> }) {
-  const view = useAsync(() => policy.getPolicy(), [policy.payerId, busy]);
-  const agents = useAsync(() => registry.agentsOf(policy.payerId), [policy.payerId, busy]);
+function Policy({ policy, busy, exec, onPendingChanged }: { policy: PolicyClient; busy: boolean; exec: Execute; onPendingChanged(): void }) {
+  const payer = policy.payerId;
+  const { registry } = useWorkspaceRegistry();
+  const view = useAsync(() => policy.getPolicy(), [payer, busy]);
+  const compatible = view.data?.registry === registry.registryId;
+  const agents = useAsync(() => compatible ? registry.agentsOf(payer) : Promise.resolve([]), [payer, compatible, busy]);
   const [cap, setCap] = useState("");
   const v = view.data;
-  const payer = policy.payerId;
+  if (view.error) return <p className="notice error">Could not read the payment policy. {view.error}</p>;
+  if (v && !compatible) return <p className="notice error">This account’s policy trusts <code>{v.registry}</code>. Use that registry to manage its approvals, or connect a fresh named account for a new registry and policy.</p>;
 
   return (
     <>
@@ -120,7 +141,7 @@ function Policy({ policy, busy, exec }: { policy: PolicyClient; busy: boolean; e
               </button>
             )}
             <input value={cap} onChange={(e) => setCap(e.target.value)} placeholder="cap in NEAR" inputMode="decimal" />
-            <button disabled={busy || !cap} onClick={() => exec("Set account cap", setAccountDailyCap(payer, parseNear(cap)))}>
+            <button disabled={busy || !cap} onClick={() => exec("Set account cap", () => setAccountDailyCap(payer, parseNear(cap)))}>
               Set daily cap
             </button>
             {v.account_daily_cap !== null && (
@@ -131,13 +152,56 @@ function Policy({ policy, busy, exec }: { policy: PolicyClient; busy: boolean; e
           </div>
         </div>
       )}
+      {v?.pending !== undefined && <PendingPayments policy={policy} agents={agents.data ?? []} paused={v.paused} revision={Number(v.revision)} busy={busy} exec={exec} onPendingChanged={onPendingChanged} />}
+      {agents.error && <p className="notice error">{agents.error}</p>}
       <h3>Approved agents</h3>
       {(agents.data ?? []).map((agent) => (
-        <MandateCard key={agent.agent_id} agent={agent} policy={policy} busy={busy} exec={exec} />
+        <MandateCard key={agent.agent_id} agent={agent} policy={policy} busy={busy} exec={exec} confirmations={v?.pending !== undefined} />
       ))}
-      <VendorsWizard payer={payer} busy={busy} />
+      {compatible && <VendorsWizard payer={payer} busy={busy} confirmations={v?.pending !== undefined} onSigned={() => { view.reload(); agents.reload(); }} />}
     </>
   );
+}
+
+function PendingPayments({ policy, agents, paused, revision, busy, exec, onPendingChanged }: {
+  policy: PolicyClient; agents: AgentView[]; paused: boolean; revision: number; busy: boolean; exec: Execute; onPendingChanged(): void;
+}) {
+  const pending = useAsync(() => policy.getPending(), [policy.payerId]);
+  const refresh = pending.reload;
+  useEffect(() => {
+    const timer = window.setInterval(refresh, 15000);
+    return () => window.clearInterval(timer);
+  }, [refresh]);
+  const payer = policy.payerId;
+  const handles = new Map(agents.map((agent) => [agent.agent_id, agent.handle]));
+
+  return <section className="card waiting-payments" aria-labelledby="waiting-title">
+    <div className="row"><h3 id="waiting-title">Ask me first</h3><button type="button" onClick={refresh} disabled={pending.loading}>Refresh</button></div>
+    {pending.error && <p className="notice error">{pending.error}</p>}
+    {!pending.error && !pending.data?.length && <p>{pending.loading || pending.data === undefined ? "Checking for waiting payments…" : "No payments are waiting for you."}</p>}
+    {pending.data?.map((payment) => {
+      const expired = payment.expires_at <= BigInt(Date.now()) * 1_000_000n;
+      const confirmation = async (approve: boolean) => {
+        const tx = approve ? confirmPayment(payer, payment.leaf, payment.request_id, revision)
+          : (expired ? expirePayment : declinePayment)(payer, payment.leaf, payment.request_id);
+        await exec(approve ? "Confirm payment" : expired ? "Release reservation" : "Decline payment", tx, approve ? (value) => {
+          const result = Outcome.parse(value);
+          if (result.status === "denied") throw new Error(describeReason(result.reason));
+          if (result.status !== "settled") throw new Error("The transfer did not settle. Check Activity for the outcome.");
+        } : undefined);
+        refresh();
+        onPendingChanged();
+      };
+      return <article key={`${payment.leaf}:${payment.request_id}`} className="insp-section">
+        <strong>{near(payment.amount)} → {payment.recipient}</strong>
+        <p className="hint">{handles.get(payment.leaf) ?? `Agent #${payment.leaf}`}{payment.via?.kind === "connection" && ` · ${payment.via.label}`}{payment.client && ` · ${payment.client}`}<br />{expired ? "Expired" : "Confirm by"} {timeText(payment.expires_at)}</p>
+        <div className="actions">
+          <button className="primary" type="button" disabled={busy || paused || expired} onClick={() => void confirmation(true)}>Confirm payment</button>
+          <button type="button" disabled={busy} onClick={() => void confirmation(false)}>{expired ? "Release reservation" : "Decline"}</button>
+        </div>
+      </article>;
+    })}
+  </section>;
 }
 
 function pathsEqual(a: PathNode[], b: PathNode[]) {
@@ -149,12 +213,15 @@ function MandateCard({
   policy,
   busy,
   exec,
+  confirmations,
 }: {
   agent: AgentView;
   policy: PolicyClient;
   busy: boolean;
-  exec: (l: string, tx: WalletTransaction) => Promise<boolean>;
+  exec: Execute;
+  confirmations: boolean;
 }) {
+  const { registry } = useWorkspaceRegistry();
   const data = useAsync(async () => {
     const mandate = await policy.getMandate(agent.agent_id);
     if (!mandate) return null;
@@ -163,14 +230,17 @@ function MandateCard({
       Promise.all(Object.keys(mandate.recipients).map((r) => policy.getUsage(agent.agent_id, r).then((u) => [r, u] as const))),
     ]);
     return { mandate, path, usage: new Map(usage) };
-  }, [agent.agent_id, busy]);
+  }, [agent.agent_id, busy, registry]);
   const [recipient, setRecipient] = useState("");
   const [per, setPer] = useState("");
   const [daily, setDaily] = useState("");
+  const [threshold, setThreshold] = useState("");
+  const [thresholdRecipient, setThresholdRecipient] = useState("");
 
   const d = data.data;
   if (!d) return null;
   const { mandate } = d;
+  const selectedThreshold = thresholdRecipient ? mandate.recipients[thresholdRecipient]?.confirm_above : mandate.confirm_above;
   const stale = !pathsEqual(mandate.path, d.path);
   const editable = mandate.status === "Active" && !mandate.fixed;
   const used = d.usage.values().next().value?.mandate_used_today ?? 0n;
@@ -187,6 +257,20 @@ function MandateCard({
       <p>
         Daily budget for this branch: {near(used)} of {near(mandate.daily_cap)} used today. Expires {timeText(mandate.expires_at)}.
       </p>
+      {confirmations && <>
+        <p>Ask me first {mandate.confirm_above == null ? "is off for this branch" : `above ${near(mandate.confirm_above)}`}.</p>
+        {editable && <form className="actions" onSubmit={(e) => {
+          e.preventDefault();
+          void exec("Update confirmation threshold", () => setConfirmAbove(payer, agent.agent_id, threshold.trim() ? parseNear(threshold) : null, thresholdRecipient || undefined));
+        }}>
+          <select aria-label="Apply confirmation threshold to" value={thresholdRecipient} onChange={(e) => setThresholdRecipient(e.target.value)}>
+            <option value="">Entire branch</option>
+            {Object.keys(mandate.recipients).map((who) => <option key={who} value={who}>{who}</option>)}
+          </select>
+          <input aria-label="Ask me first above (NEAR)" placeholder={selectedThreshold == null ? "NEAR · blank to clear" : `${near(selectedThreshold)} · blank to clear`} inputMode="decimal" value={threshold} onChange={(e) => setThreshold(e.target.value)} />
+          <button type="submit" disabled={busy}>Save confirmation threshold</button>
+        </form>}
+      </>}
       {stale && !mandate.fixed && (
         <button disabled={busy} onClick={() => exec("Re-approve", reapprove(payer, agent.agent_id, mandate, d.path))}>
           Re-approve for the current holder and executor
@@ -200,6 +284,7 @@ function MandateCard({
             <th>Daily</th>
             <th>Used today</th>
             <th>Expires</th>
+            {confirmations && <th>Ask me first above</th>}
             <th />
           </tr>
         </thead>
@@ -211,6 +296,7 @@ function MandateCard({
               <td>{near(rule.daily_cap)}</td>
               <td>{near(d.usage.get(who)?.recipient_used_today ?? 0n)}</td>
               <td>{timeText(rule.expires_at)}</td>
+              {confirmations && <td>{rule.confirm_above == null ? "—" : near(rule.confirm_above)}</td>}
               <td>
                 {editable && (
                   <button disabled={busy} onClick={() => exec("Remove recipient", removeRecipient(payer, agent.agent_id, who))}>
@@ -229,7 +315,7 @@ function MandateCard({
             e.preventDefault();
             void exec(
               "Approve recipient",
-              approveRecipient(payer, agent.agent_id, { recipient: recipient.trim(), perPaymentCap: parseNear(per), dailyCap: parseNear(daily) }),
+              () => approveRecipient(payer, agent.agent_id, { recipient: recipient.trim(), perPaymentCap: parseNear(per), dailyCap: parseNear(daily) }),
             );
           }}
         >
@@ -257,11 +343,13 @@ function reapprove(payer: string, agentId: string, mandate: Mandate, path: PathN
     dailyCap: mandate.daily_cap,
     expiresAt: mandate.expires_at,
     fixed: mandate.fixed,
+    confirmAbove: mandate.confirm_above,
     recipients: Object.entries(mandate.recipients).map(([recipient, r]) => ({
       recipient,
       perPaymentCap: r.per_payment_cap,
       dailyCap: r.daily_cap,
       expiresAt: r.expires_at,
+      confirmAbove: r.confirm_above,
     })),
   });
 }

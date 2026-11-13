@@ -1,26 +1,36 @@
-import { ArrowDown, ArrowRight, Bot, Gauge, GitBranch, KeyRound, Plus, ShieldCheck, Wallet } from "lucide-react";
-import { PaymentPolicyPreview, PaymentWalkthrough } from "../components/PaymentPolicyPreview.tsx";
+import { ArrowDown, ArrowRight, Plus, ShieldCheck } from "lucide-react";
+import { PaymentDemo } from "../components/PaymentDemo.tsx";
+import { PaymentPolicyPreview } from "../components/PaymentPolicyPreview.tsx";
 import { Topbar } from "../components/Topbar.tsx";
 import { WalletEntry } from "../components/WalletEntry.tsx";
 import { config } from "../config.ts";
 import { href } from "../router.ts";
 
 const STEPS = [
-  { icon: Wallet, title: "Connect your wallet", text: "Use Meteor or another NEAR wallet. Keep your existing address and balance." },
-  { icon: Bot, title: "Register an agent", text: "Give the agent a handle and link its executor account." },
-  { icon: ShieldCheck, title: "Enable payments", text: "Install the policy on your account so it can enforce your rules on-chain." },
-  { icon: Gauge, title: "Approve recipients", text: "Set a limit per payment and per day, plus an overall budget for the agent." },
+  { title: "Connect your wallet", text: "Choose an available NEAR wallet for your network. Keep your existing address and balance." },
+  { title: "Register an agent", text: "Give the agent a handle and a payment ceiling in your registry." },
+  { title: "Enable payments", text: "Install the policy on your account so it can enforce your rules on-chain." },
+  { title: "Approve recipients and connect", text: "Set the spending limits and connect the agent with a restricted key." },
 ];
 
 const CONTROLS = [
-  { icon: Gauge, title: "Limits per recipient", text: "Set a per-payment cap and daily cap for each recipient, inside an overall budget for the agent." },
-  { icon: GitBranch, title: "Control each agent", text: "Give child agents narrower permissions. Pause one agent, its entire branch, or all agent payments from your account." },
-  { icon: KeyRound, title: "Owner-controlled access", text: "Your keys stay in your wallet. Transferring an agent NFT invalidates the previous owner’s payment approvals." },
+  { title: "Limits per recipient", text: "Set a per-payment cap and daily cap for each recipient, inside an overall budget for the agent." },
+  { title: "Control each agent", text: "Give child agents narrower permissions. Pause one agent, its entire branch, or all agent payments from your account." },
+  { title: "Owner-controlled access", text: "Your keys stay in your wallet. Transferring an agent NFT invalidates the previous owner’s payment approvals." },
+];
+
+const INTEGRATIONS = [
+  { name: "Claude Desktop", icon: "claude.svg", position: "chat" },
+  { name: "Claude Code", icon: "claude-code.svg", position: "code" },
+  { name: "Cursor", icon: "cursor.svg", position: "runner" },
+  { name: "Meteor Wallet", icon: "meteor.svg", position: "workflow" },
+  { name: "Intear Wallet", icon: "intear.svg", position: "paid" },
+  { name: "NEAR Mobile", icon: "near-mobile.webp", position: "blocked" },
 ];
 
 const QUESTIONS = [
-  { question: "Do I approve every payment?", answer: "You sign to approve a recipient and set its limits. After setup, an agent can make payments automatically when the recipient and amount fit the policy." },
-  { question: "Who decides whether a payment goes through?", answer: "The registry authenticates the executor. The policy on your NEAR account checks the recipient, caps, remaining budget, balance, and pause state before dispatching a transfer." },
+  { question: "Do I approve every payment?", answer: "Payments within your limits can settle automatically. Set an Ask me first threshold to confirm larger eligible requests in your wallet." },
+  { question: "Who decides whether a payment goes through?", answer: "The registry checks the agent and its capabilities. Your account policy checks the recipient, limits, balance, and pause state before sending NEAR." },
   { question: "Can I stop an agent from paying?", answer: "You can pause payments, remove a recipient, or revoke a mandate. The next request checked by your account uses the updated policy. A transfer already dispatched can still settle." },
   { question: "Where do my funds stay?", answer: "Payments come directly from the existing NEAR account you connected. That account runs the payment policy and transfers funds when the checks pass." },
 ];
@@ -34,7 +44,7 @@ export function Landing() {
           <div className="hero-art" aria-hidden="true" />
           <div className="hero-inner">
             <div className="hero-copy">
-              <div className="eyebrow hero-eyebrow">
+              <div className="hero-eyebrow">
                 <span>On-chain spending controls</span>
                 <span className="hero-network"><i aria-hidden="true" />{config.network}</span>
               </div>
@@ -53,14 +63,22 @@ export function Landing() {
         </section>
 
         <section className="landing-section safeguards" id="how-it-works" aria-labelledby="controls-title">
-          <header className="section-intro">
-            <h2 id="controls-title">You set the spending rules.</h2>
-            <p className="lead">Agents submit requests. The policy on your NEAR account decides what can be paid.</p>
-          </header>
+          <div className="platform-showcase">
+            <ul className="showcase-tiles" aria-label="Example agent apps and NEAR wallets">
+              {INTEGRATIONS.map(({ name, icon, position }) => (
+                <li key={name} className={`platform-tile tile-${position}`}><img src={`/integrations/${icon}`} width={26} height={26} alt="" /> {name}</li>
+              ))}
+              <li className="platform-tile tile-budget"><ShieldCheck size={20} aria-hidden="true" /> 10 NEAR daily cap</li>
+            </ul>
+            <header className="platform-copy">
+              <h2 id="controls-title">Your agents.<br />Your rules.</h2>
+              <p className="lead">Connect a local MCP client or custom runner. Choose a NEAR wallet from the options available for your network.</p>
+              <a className="text-link" href="#payment-walkthrough">Try it here <ArrowDown size={16} aria-hidden="true" /></a>
+            </header>
+          </div>
           <ul className="control-list">
-            {CONTROLS.map(({ icon: Icon, title, text }) => (
+            {CONTROLS.map(({ title, text }) => (
               <li key={title}>
-                <Icon size={20} aria-hidden="true" />
                 <h3>{title}</h3>
                 <p>{text}</p>
               </li>
@@ -68,7 +86,7 @@ export function Landing() {
           </ul>
         </section>
 
-        <PaymentWalkthrough />
+        <PaymentDemo />
 
         <section className="landing-section setup" aria-labelledby="steps-title">
           <div>
@@ -77,9 +95,8 @@ export function Landing() {
             <a className="text-link" href={href("/docs/getting-started")}>Getting started guide <ArrowRight size={15} aria-hidden="true" /></a>
           </div>
           <ol className="steps">
-            {STEPS.map(({ icon: Icon, title, text }) => (
+            {STEPS.map(({ title, text }) => (
               <li key={title}>
-                <Icon size={21} aria-hidden="true" />
                 <div><h3>{title}</h3><p>{text}</p></div>
               </li>
             ))}

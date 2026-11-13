@@ -15,7 +15,19 @@ export type WalletAction =
       params: { methodName: string; args: Record<string, unknown>; gas: string; deposit: string };
     }
   | { type: "DeployContract"; params: { code: Uint8Array } }
-  | { type: "UseGlobalContract"; params: { contractIdentifier: { codeHash: string } } };
+  | { type: "UseGlobalContract"; params: { contractIdentifier: { codeHash: string } } }
+  | { type: "CreateAccount" }
+  | { type: "Transfer"; params: { deposit: string } }
+  | {
+      type: "AddKey";
+      params: {
+        publicKey: string;
+        // Always a function-call permission with an explicit allowance and method list.
+        // A full-access permission is deliberately not representable here.
+        accessKey: { permission: { receiverId: string; allowance: string; methodNames: string[] } };
+      };
+    }
+  | { type: "DeleteKey"; params: { publicKey: string } };
 
 export interface WalletTransaction {
   receiverId: string;
@@ -30,6 +42,7 @@ export const RECORD_STORAGE_DEPOSIT = parseNear("0.02");
 const OWNER_GAS = 30n * TGAS;
 const MINT_GAS = 60n * TGAS;
 const INIT_GAS = 100n * TGAS;
+const CONFIRM_GAS = 120n * TGAS;
 
 function call(methodName: string, args: Record<string, unknown>, deposit: bigint, gas = OWNER_GAS): WalletAction {
   return {
@@ -65,7 +78,8 @@ export function transferCapability(maxPerPayment: bigint): Capabilities {
 // ------------------------------------------------------------------ registry
 
 export interface AgentInput {
-  executor: string;
+  /** Executor account for the registry's `execute`. Leave empty for agents that act only through connection keys. */
+  executor?: string | null;
   capabilities: Capabilities;
   expiresAt?: bigint | null;
   locks?: number;
@@ -74,7 +88,7 @@ export interface AgentInput {
 
 function agentArgs(input: AgentInput) {
   return {
-    executor: input.executor,
+    executor: input.executor || null,
     capabilities: toWireCapabilities(input.capabilities),
     expires_at: nsToJson(input.expiresAt),
     locks: input.locks ?? null,
@@ -142,6 +156,8 @@ export interface RecipientRuleInput {
   perPaymentCap: bigint;
   dailyCap: bigint;
   expiresAt?: bigint | null;
+  /** Payments to this recipient above this amount wait for the owner ("ask me first"). */
+  confirmAbove?: bigint | null;
 }
 
 function wireRule(rule: RecipientRuleInput) {
@@ -150,6 +166,7 @@ function wireRule(rule: RecipientRuleInput) {
     per_payment_cap: rule.perPaymentCap.toString(),
     daily_cap: rule.dailyCap.toString(),
     expires_at: nsToJson(rule.expiresAt),
+    confirm_above: rule.confirmAbove == null ? null : rule.confirmAbove.toString(),
   };
 }
 
@@ -189,6 +206,8 @@ export interface MandateInput {
   expiresAt?: bigint | null;
   fixed?: boolean;
   recipients: RecipientRuleInput[];
+  /** Payments by this branch above this amount wait for the owner ("ask me first"). */
+  confirmAbove?: bigint | null;
 }
 
 export function setMandate(payerId: string, input: MandateInput): WalletTransaction {
@@ -199,11 +218,122 @@ export function setMandate(payerId: string, input: MandateInput): WalletTransact
     expires_at: nsToJson(input.expiresAt),
     fixed: input.fixed ?? false,
     recipients: input.recipients.map(wireRule),
+    confirm_above: input.confirmAbove == null ? null : input.confirmAbove.toString(),
   });
 }
 
 export function approveRecipient(payerId: string, agentId: string, rule: RecipientRuleInput): WalletTransaction {
-  return oneYoctoCall(payerId, "approve_recipient", { agent_id: agentId, ...wireRule(rule) });
+  const { confirm_above: _ignored, ...args } = wireRule(rule);
+  return oneYoctoCall(payerId, "approve_recipient", { agent_id: agentId, ...args });
+}
+
+/** Sets the "ask me first" threshold of a mandate, or of one recipient. `null` removes it. */
+export function setConfirmAbove(payerId: string, agentId: string, amount: bigint | null, recipient?: string): WalletTransaction {
+  return oneYoctoCall(payerId, "set_confirm_above", {
+    agent_id: agentId,
+    recipient: recipient ?? null,
+    amount: amount === null ? null : amount.toString(),
+  });
+}
+
+/** Confirms a payment waiting for the owner. The registry checks the agent again, then it is sent. */
+export function confirmPayment(payerId: string, agentId: string, requestId: string, expectedRevision?: number): WalletTransaction {
+  return { receiverId: payerId, actions: [call("confirm", { agent_id: agentId, request_id: requestId, expected_revision: expectedRevision ?? null }, ONE_YOCTO, CONFIRM_GAS)] };
+}
+
+export const declinePayment = (payerId: string, agentId: string, requestId: string) =>
+  oneYoctoCall(payerId, "decline", { agent_id: agentId, request_id: requestId });
+
+/** Anyone may expire a waiting payment after its deadline; no deposit needed. */
+export function expirePayment(payerId: string, agentId: string, requestId: string): WalletTransaction {
+  return { receiverId: payerId, actions: [call("expire", { agent_id: agentId, request_id: requestId }, 0n)] };
+}
+
+// ------------------------------------------------------------------ owner's registry
+
+/** Storage deposit for a registry that points at shared (global) code. */
+export const REGISTRY_DEPOSIT_GLOBAL = parseNear("0.3");
+/** Storage deposit for a registry with its own copy of the code (about 340 KB). */
+export const REGISTRY_DEPOSIT_DIRECT = parseNear("3.6");
+
+/**
+ * Creates the owner's registry on `agents.<owner>` in one transaction signed by
+ * the owner: create the account, fund its storage, deploy the code, and
+ * initialize it with the owner. No key is added, so nobody can change its code.
+ */
+export function createRegistry(
+  ownerId: string,
+  registryId: string,
+  code: PolicyCode,
+  deposit = "code" in code ? REGISTRY_DEPOSIT_DIRECT : REGISTRY_DEPOSIT_GLOBAL,
+): WalletTransaction {
+  if (!registryId.endsWith(`.${ownerId}`)) throw new Error(`${registryId} must be a sub-account of ${ownerId}`);
+  const deploy: WalletAction =
+    "code" in code
+      ? { type: "DeployContract", params: { code: code.code } }
+      : { type: "UseGlobalContract", params: { contractIdentifier: { codeHash: code.globalCodeHash } } };
+  return {
+    receiverId: registryId,
+    actions: [
+      { type: "CreateAccount" },
+      { type: "Transfer", params: { deposit: deposit.toString() } },
+      deploy,
+      call("new", { owner: ownerId }, 0n, INIT_GAS),
+    ],
+  };
+}
+
+// ------------------------------------------------------------------ connections
+
+/** Default gas allowance for a connection key: it only pays network fees. */
+export const CONNECTION_ALLOWANCE = parseNear("0.25");
+
+export interface ConnectionInput {
+  agentId: string;
+  /** The new key's public key, `ed25519:…`. Generate it fresh for every connection. */
+  publicKey: string;
+  /** Platform id from the catalog, for example `claude-desktop`. */
+  platform: string;
+  label: string;
+  allowance?: bigint;
+}
+
+/**
+ * Adds a connection key to the owner's own account and records which agent it
+ * acts for, in one transaction. The key can call only `agent_execute` on the
+ * owner's account, cannot attach a deposit, and spends at most `allowance` on fees.
+ */
+export function connectAgentKey(ownerId: string, input: ConnectionInput): WalletTransaction {
+  if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(input.publicKey)) throw new Error("Expected an ed25519 public key");
+  const allowance = input.allowance ?? CONNECTION_ALLOWANCE;
+  if (allowance <= 0n) throw new Error("The allowance must be above zero");
+  return {
+    receiverId: ownerId,
+    actions: [
+      {
+        type: "AddKey",
+        params: {
+          publicKey: input.publicKey,
+          accessKey: { permission: { receiverId: ownerId, allowance: allowance.toString(), methodNames: ["agent_execute"] } },
+        },
+      },
+      call(
+        "connect_agent_key",
+        { agent_id: input.agentId, public_key: input.publicKey, platform: input.platform, label: input.label },
+        ONE_YOCTO,
+      ),
+    ],
+  };
+}
+
+/**
+ * Removes a connection. Deletes the key too, unless it is already gone
+ * (`keyPresent: false`), because deleting a missing key fails the transaction.
+ */
+export function disconnectAgentKey(ownerId: string, publicKey: string, opts: { keyPresent: boolean } = { keyPresent: true }): WalletTransaction {
+  const actions: WalletAction[] = [call("disconnect_agent_key", { public_key: publicKey }, ONE_YOCTO)];
+  if (opts.keyPresent) actions.push({ type: "DeleteKey", params: { publicKey } });
+  return { receiverId: ownerId, actions };
 }
 
 export const removeRecipient = (payerId: string, agentId: string, recipient: string) =>

@@ -10,7 +10,8 @@ import {
   type PlanContext,
   type ValidationIssue,
 } from "@nearfirewall/templates";
-import { config, policyOf, registry } from "../config.ts";
+import { policyOf } from "../config.ts";
+import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { ensureOk } from "../format.ts";
 import { useWallet } from "../wallet.tsx";
 
@@ -25,13 +26,15 @@ interface RecipientRow {
  * the owner through signing each step. Steps are signed one at a time because
  * later steps refer to agents that earlier steps create.
  */
-export function VendorsWizard({ payer, busy }: { payer: string; busy: boolean }) {
+export function VendorsWizard({ payer, busy, confirmations, onSigned }: { payer: string; busy: boolean; confirmations: boolean; onSigned(): void }) {
   const { accountId, send } = useWallet();
+  const { registry, mode, policyCodeHash } = useWorkspaceRegistry();
   const [handle, setHandle] = useState("");
   const [existing, setExisting] = useState(false);
   const [executor, setExecutor] = useState("");
   const [maxPerPayment, setMax] = useState("3");
   const [dailyBudget, setBudget] = useState("10");
+  const [confirmAbove, setConfirmAbove] = useState("");
   const [rows, setRows] = useState<RecipientRow[]>([{ recipient: "", perPayment: "3", daily: "6" }]);
   const [plan, setPlan] = useState<Plan | null>(null);
   const [issues, setIssues] = useState<ValidationIssue[]>([]);
@@ -40,22 +43,23 @@ export function VendorsWizard({ payer, busy }: { payer: string; busy: boolean })
   const [signing, setSigning] = useState(false);
 
   if (!accountId) return null;
-  const ctx: PlanContext = { now: nowNs(), owner: accountId, payer, registryId: config.registryId };
+  const ctx: PlanContext = { now: nowNs(), owner: accountId, payer, registryId: registry.registryId };
 
   const review = async () => {
     setError(null);
     setDone(0);
     try {
+      if (!existing && mode !== "per-user" && !executor.trim()) throw new Error("Enter the executor account for this agent.");
       let built = buildPlan(
         approvedVendors,
-        { handle, executor: existing ? "existing.invalid" : executor, maxPerPayment, dailyBudget, recipients: rows },
+        { handle, executor: existing ? undefined : executor.trim() || undefined, maxPerPayment, dailyBudget, confirmAbove: confirmAbove.trim() || undefined, recipients: rows, nonTransferable: mode === "per-user" },
         ctx,
       );
       if (existing) built = { ...built, steps: built.steps.filter((s) => s.kind === "set_mandate") };
       const result = await validatePlanLive(built, ctx, {
         registry,
         policy: policyOf(payer),
-        expectedPolicyCodeHash: config.policyCodeHash,
+        expectedPolicyCodeHash: policyCodeHash,
       });
       setPlan(built);
       setIssues(result.issues);
@@ -74,6 +78,7 @@ export function VendorsWizard({ payer, busy }: { payer: string; busy: boolean })
     try {
       ensureOk(await send(await toTransaction(step, ctx, registry)));
       setDone(done + 1);
+      onSigned();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -97,7 +102,7 @@ export function VendorsWizard({ payer, busy }: { payer: string; busy: boolean })
       {!existing && (
         <>
           <label>
-            Executor account <input value={executor} onChange={(e) => setExecutor(e.target.value)} placeholder="agent-runner.testnet" />
+            {mode === "per-user" ? "Executor account (optional)" : "Executor account"} <input value={executor} onChange={(e) => setExecutor(e.target.value)} placeholder="agent-runner.testnet" />
           </label>
           <label>
             Max per payment (NEAR) <input value={maxPerPayment} onChange={(e) => setMax(e.target.value)} inputMode="decimal" />
@@ -107,6 +112,7 @@ export function VendorsWizard({ payer, busy }: { payer: string; busy: boolean })
       <label>
         Daily budget across all recipients (NEAR) <input value={dailyBudget} onChange={(e) => setBudget(e.target.value)} inputMode="decimal" />
       </label>
+      {confirmations && <label>Ask me first above (NEAR, optional) <input value={confirmAbove} onChange={(e) => setConfirmAbove(e.target.value)} inputMode="decimal" /></label>}
       <table>
         <thead>
           <tr>

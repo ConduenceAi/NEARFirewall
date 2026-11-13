@@ -42,6 +42,11 @@ export const REASONS = [
   "MANDATE_DAILY_CAP",
   "ACCOUNT_DAILY_CAP",
   "INSUFFICIENT_BALANCE",
+  "UNKNOWN_CONNECTION",
+  "AUTHORIZATION_FAILED",
+  "CONFIRMATION_DECLINED",
+  "CONFIRMATION_EXPIRED",
+  "TOO_MANY_PENDING",
 ] as const;
 export const Reason = z.enum(REASONS);
 export type Reason = z.infer<typeof Reason>;
@@ -66,6 +71,7 @@ export const Outcome = z.discriminatedUnion("status", [
   z.object({ status: z.literal("settled"), request_id: z.string() }),
   z.object({ status: z.literal("failed"), request_id: z.string() }),
   z.object({ status: z.literal("denied"), reason: Reason, detail: z.string().nullable().optional() }),
+  z.object({ status: z.literal("awaiting_confirmation"), request_id: z.string(), expires_at: NumU64 }),
 ]);
 export type Outcome = z.infer<typeof Outcome>;
 
@@ -83,7 +89,7 @@ export const AgentView = z.object({
   parent: z.string().nullable(),
   ancestors: z.array(z.string()),
   depth: z.number(),
-  executor: AccountId,
+  executor: AccountId.nullable(),
   capabilities: Capabilities,
   status: AgentStatus,
   expires_at: U64.nullable(),
@@ -111,6 +117,8 @@ export const RecipientRule = z.object({
   per_payment_cap: U128,
   daily_cap: U128,
   expires_at: NumU64.nullable(),
+  /** Payments to this recipient above this amount wait for the owner ("ask me first"). */
+  confirm_above: U128.nullable().optional(),
 });
 export type RecipientRule = z.infer<typeof RecipientRule>;
 
@@ -121,6 +129,8 @@ export const Mandate = z.object({
   expires_at: NumU64.nullable(),
   daily_cap: U128,
   recipients: z.record(z.string(), RecipientRule),
+  /** Payments by this branch above this amount wait for the owner ("ask me first"). */
+  confirm_above: U128.nullable().optional(),
 });
 export type Mandate = z.infer<typeof Mandate>;
 
@@ -135,6 +145,8 @@ export const PolicyView = z.object({
   reserved_total: U128,
   available_balance: U128,
   day: NumU64,
+  connections: z.number().optional(),
+  pending: z.number().optional(),
 });
 export type PolicyView = z.infer<typeof PolicyView>;
 
@@ -146,6 +158,13 @@ export const UsageView = z.object({
 });
 export type UsageView = z.infer<typeof UsageView>;
 
+/** How a request reached the policy. */
+export const Via = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("executor"), account: AccountId }),
+  z.object({ kind: z.literal("connection"), public_key: z.string(), label: z.string() }),
+]);
+export type Via = z.infer<typeof Via>;
+
 export const PaymentRequestRecord = z.object({
   leaf: z.string(),
   request_id: z.string(),
@@ -153,8 +172,10 @@ export const PaymentRequestRecord = z.object({
   amount: U128,
   day: NumU64,
   created_at: NumU64,
-  status: z.enum(["Pending", "Settled", "Failed"]),
+  status: z.enum(["Pending", "Settled", "Failed", "Declined", "Expired"]),
   mandates: z.array(z.string()),
+  via: Via.nullable().optional(),
+  client: z.string().nullable().optional(),
 });
 export type PaymentRequestRecord = z.infer<typeof PaymentRequestRecord>;
 
@@ -165,8 +186,10 @@ export const PolicyActivity = z.object({
   request_id: z.string(),
   recipient: AccountId,
   amount: U128,
-  outcome: z.enum(["settled", "failed", "denied"]),
+  outcome: z.enum(["settled", "failed", "denied", "awaiting", "declined", "expired"]),
   reason: Reason.nullable(),
+  via: Via.nullable().optional(),
+  client: z.string().nullable().optional(),
 });
 export type PolicyActivity = z.infer<typeof PolicyActivity>;
 
@@ -174,7 +197,36 @@ export const Preview = z.object({
   allowed: z.boolean(),
   reason: Reason.nullable(),
   mandates: z.array(z.string()),
+  needs_confirmation: z.boolean().optional(),
 });
+
+/** An agent key on the owner's account and the agent it acts for. */
+export const Connection = z.object({
+  public_key: z.string(),
+  agent_id: z.string(),
+  platform: z.string(),
+  label: z.string(),
+  created_at: NumU64,
+  last_used: NumU64.nullable(),
+  uses: z.number(),
+});
+export type Connection = z.infer<typeof Connection>;
+
+/** A payment waiting for the owner ("ask me first"). */
+export const PendingConfirmation = z.object({
+  leaf: z.string(),
+  request_id: z.string(),
+  recipient: AccountId,
+  amount: U128,
+  day: NumU64,
+  created_at: NumU64,
+  expires_at: NumU64,
+  path: z.array(PathNode),
+  mandates: z.array(z.string()),
+  via: Via.nullable().optional(),
+  client: z.string().nullable().optional(),
+});
+export type PendingConfirmation = z.infer<typeof PendingConfirmation>;
 export type Preview = z.infer<typeof Preview>;
 
 /** Lock bits, matching the registry contract. */
@@ -185,4 +237,10 @@ export const LOCKS = {
 export const SUPPORTED_LOCKS = LOCKS.NO_TRANSFER | LOCKS.NO_CAPABILITY_RAISE;
 
 export const MAX_DEPTH = 8;
+/** The only method a connection key may call on the owner's account. */
+export const AGENT_EXECUTE_METHOD = "agent_execute";
+/** The registry account for an owner: a sub-account of the owner's own account. */
+export function registryAccountFor(owner: string): string {
+  return `agents.${owner}`;
+}
 export const MAX_RECIPIENTS = 50;

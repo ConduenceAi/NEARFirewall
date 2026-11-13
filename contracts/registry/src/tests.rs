@@ -51,7 +51,7 @@ fn rid(n: u64) -> String {
 
 fn setup() -> Registry {
     call(&alice(), 0, T0);
-    Registry::new()
+    Registry::new(alice())
 }
 
 fn register(
@@ -64,7 +64,7 @@ fn register(
     call(who, NEAR, T0);
     r.register_agent(
         handle.into(),
-        acc(executor),
+        Some(acc(executor)),
         caps(max),
         None,
         None,
@@ -84,7 +84,7 @@ fn child(
     r.create_child(
         parent.into(),
         label.into(),
-        acc(executor),
+        Some(acc(executor)),
         caps(max),
         None,
         None,
@@ -126,7 +126,7 @@ fn register_mints_a_token_to_the_caller() {
     let view = register(&mut r, &alice(), "market-agent", "runner.testnet", 3);
     assert_eq!(view.agent_id, "1");
     assert_eq!(view.holder, Some(alice()));
-    assert_eq!(view.executor, runner());
+    assert_eq!(view.executor, Some(runner()));
     assert_eq!(view.status, Status::Active);
     assert_eq!(view.depth, 0);
     let tokens = r.nft_tokens_for_owner(alice(), None, None);
@@ -153,7 +153,7 @@ fn ids_and_generations_are_unique_and_sequential() {
 fn handles_are_unique() {
     let mut r = setup();
     register(&mut r, &alice(), "market-agent", "runner.testnet", 3);
-    register(&mut r, &bob(), "market-agent", "runner2.testnet", 3);
+    register(&mut r, &alice(), "market-agent", "runner2.testnet", 3);
 }
 
 #[test]
@@ -175,7 +175,14 @@ fn executor_cannot_be_the_holder() {
 fn registration_requires_a_storage_deposit() {
     let mut r = setup();
     call(&alice(), 1, T0);
-    r.register_agent("market-agent".into(), runner(), caps(3), None, None, None);
+    r.register_agent(
+        "market-agent".into(),
+        Some(runner()),
+        caps(3),
+        None,
+        None,
+        None,
+    );
 }
 
 #[test]
@@ -207,7 +214,7 @@ fn no_transfer_lock_blocks_approvals() {
     call(&alice(), NEAR, T0);
     r.register_agent(
         "market-agent".into(),
-        runner(),
+        Some(runner()),
         caps(3),
         None,
         Some(LOCK_NO_TRANSFER),
@@ -429,7 +436,7 @@ fn expired_agents_are_rejected() {
     call(&alice(), NEAR, T0);
     r.register_agent(
         "market-agent".into(),
-        runner(),
+        Some(runner()),
         caps(3),
         Some(T0 + 100),
         None,
@@ -458,7 +465,7 @@ fn new_executor_takes_over_and_generation_advances() {
     let mut r = setup();
     let before = register(&mut r, &alice(), "market-agent", "runner.testnet", 3);
     call(&alice(), 1, T0);
-    r.set_executor("1".into(), acc("runner2.testnet"));
+    r.set_executor("1".into(), Some(acc("runner2.testnet")));
     let after = r.get_agent("1".into()).unwrap();
     assert!(after.generation.0 > before.generation.0);
     assert_eq!(
@@ -550,7 +557,7 @@ fn children_cannot_outlive_their_parent() {
     call(&alice(), NEAR, T0);
     r.register_agent(
         "desk".into(),
-        runner(),
+        Some(runner()),
         caps(3),
         Some(T0 + 1000),
         None,
@@ -560,7 +567,7 @@ fn children_cannot_outlive_their_parent() {
     r.create_child(
         "1".into(),
         "bot-1".into(),
-        acc("runner-1.testnet"),
+        Some(acc("runner-1.testnet")),
         caps(1),
         None,
         None,
@@ -682,10 +689,10 @@ fn an_ancestor_holder_keeps_control_after_a_child_transfer() {
     child(&mut r, &alice(), "1", "bot-1", "runner-1.testnet", 3);
     call(&alice(), 1, T0);
     r.nft_transfer(bob(), "2".into(), None, None);
-    r.set_executor("2".into(), acc("runner-9.testnet"));
+    r.set_executor("2".into(), Some(acc("runner-9.testnet")));
     assert_eq!(
         r.get_agent("2".into()).unwrap().executor,
-        acc("runner-9.testnet")
+        Some(acc("runner-9.testnet"))
     );
     // Bob holds the leaf, so he is on the path and may act as payer.
     assert_eq!(
@@ -722,7 +729,7 @@ fn a_transferred_leaf_cannot_spend_from_the_previous_holder() {
     );
     // The new holder rotating the executor does not help either.
     call(&bob(), 1, T0);
-    r.set_executor("2".into(), acc("bob-runner.testnet"));
+    r.set_executor("2".into(), Some(acc("bob-runner.testnet")));
     assert_eq!(
         exec_as(
             &mut r,
@@ -785,7 +792,7 @@ fn expiry_never_moves_earlier() {
     call(&alice(), NEAR, T0);
     r.register_agent(
         "desk".into(),
-        runner(),
+        Some(runner()),
         caps(3),
         Some(T0 + 1000),
         None,
@@ -866,4 +873,142 @@ fn record_values_are_bounded() {
     register(&mut r, &alice(), "desk", "runner.testnet", 3);
     call(&alice(), NEAR, T0);
     r.set_record("1".into(), "profile.description".into(), "x".repeat(1025));
+}
+
+// ---------------------------------------------------------------- owner and authorize (R1)
+
+fn path_ids(path: &[PathNode]) -> Vec<String> {
+    path.iter().map(|n| n.agent_id.clone()).collect()
+}
+
+#[test]
+#[should_panic(expected = "Only the owner can initialize their registry")]
+fn only_the_owner_initializes() {
+    call(&bob(), 0, T0);
+    Registry::new(alice());
+}
+
+#[test]
+#[should_panic(expected = "Only the registry's owner can register agents")]
+fn only_the_owner_registers_agents() {
+    let mut r = setup();
+    register(&mut r, &bob(), "bobs-agent", "runner.testnet", 3);
+}
+
+#[test]
+fn the_owner_is_readable() {
+    let r = setup();
+    assert_eq!(r.get_owner(), alice());
+}
+
+#[test]
+fn agents_without_an_executor_cannot_execute() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    let view = r.register_agent("trader".into(), None, caps(3), None, None, None);
+    assert_eq!(view.executor, None);
+    assert_eq!(
+        exec_as(
+            &mut r,
+            &runner(),
+            &alice(),
+            "1",
+            transfer("vendor.testnet", 1),
+            1
+        ),
+        denied(Reason::ExecutorMismatch)
+    );
+}
+
+#[test]
+fn authorize_returns_the_path_to_the_owner() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent("desk".into(), None, caps(3), None, None, None);
+    call(&alice(), NEAR, T0);
+    r.create_child("1".into(), "bot-1".into(), None, caps(2), None, None, None);
+    call(&alice(), 0, T0);
+    match r.authorize("2".into(), transfer("vendor.testnet", 2), rid(1)) {
+        Authorization::Allowed { path } => assert_eq!(path_ids(&path), vec!["1", "2"]),
+        other => panic!("expected allowed, got {other:?}"),
+    }
+    assert_eq!(r.get_activity("2".into(), None)[0].outcome, "routed");
+}
+
+#[test]
+fn authorize_refuses_other_callers_without_writing() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent("trader".into(), None, caps(3), None, None, None);
+    call(&bob(), 0, T0);
+    assert_eq!(
+        r.authorize("1".into(), transfer("vendor.testnet", 1), rid(1)),
+        Authorization::Denied {
+            reason: Reason::UntrustedCaller,
+            detail: None
+        }
+    );
+    assert!(r.get_activity("1".into(), None).is_empty());
+}
+
+#[test]
+fn authorize_applies_the_path_checks() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent("desk".into(), None, caps(3), None, None, None);
+    call(&alice(), NEAR, T0);
+    r.create_child("1".into(), "bot-1".into(), None, caps(3), None, None, None);
+    call(&alice(), 0, T0);
+    assert!(matches!(
+        r.authorize("2".into(), transfer("vendor.testnet", 4), rid(1)),
+        Authorization::Denied {
+            reason: Reason::CapExceeded,
+            ..
+        }
+    ));
+    call(&alice(), 1, T0);
+    r.pause("1".into());
+    call(&alice(), 0, T0);
+    assert!(matches!(
+        r.authorize("2".into(), transfer("vendor.testnet", 1), rid(2)),
+        Authorization::Denied {
+            reason: Reason::BranchPaused,
+            ..
+        }
+    ));
+    assert_eq!(
+        r.get_activity("2".into(), None)[0].reason,
+        Some(Reason::BranchPaused)
+    );
+    assert!(matches!(
+        r.authorize("2".into(), transfer("vendor.testnet", 1), "bad".into()),
+        Authorization::Denied {
+            reason: Reason::InvalidRequest,
+            ..
+        }
+    ));
+    assert!(matches!(
+        r.authorize("9".into(), transfer("vendor.testnet", 1), rid(3)),
+        Authorization::Denied {
+            reason: Reason::AgentNotFound,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn authorize_refuses_an_agent_the_owner_no_longer_holds() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent("trader".into(), None, caps(3), None, None, None);
+    call(&alice(), 1, T0);
+    r.nft_transfer(bob(), "1".into(), None, None);
+    call(&alice(), 0, T0);
+    assert!(matches!(
+        r.authorize("1".into(), transfer("vendor.testnet", 1), rid(1)),
+        Authorization::Denied {
+            reason: Reason::PayerNotAuthorized,
+            ..
+        }
+    ));
 }

@@ -60,7 +60,7 @@ const LOOKS_HASHED = /^(0x)?[0-9a-f]{64}$|^(sha256|enc|ipfs|ar):/i;
 interface AgentShape {
   capabilities: Capabilities;
   expiresAt: bigint | null;
-  executor: string;
+  executor: string | null;
   depth: number;
 }
 
@@ -99,7 +99,7 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
         const handle = step.kind === "register_agent" ? step.handle : childHandle(step);
         const label = step.kind === "register_agent" ? step.handle : step.label;
         if (!LABEL.test(label)) add("error", "INVALID_LABEL", `"${label}" must be 2-32 characters of a-z, 0-9 and '-'.`, i);
-        if (step.executor === ctx.owner) {
+        if (step.executor && step.executor === ctx.owner) {
           add("error", "EXECUTOR_IS_OWNER", "The executor must be a separate account from the owner.", i);
         }
         if (step.locks !== undefined && (step.locks & ~SUPPORTED_LOCKS) !== 0) {
@@ -127,7 +127,7 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
             if (depth >= MAX_DEPTH) add("error", "TOO_DEEP", `Agent trees can be at most ${MAX_DEPTH} levels deep.`, i);
           }
         }
-        executors.add(step.executor);
+        if (step.executor) executors.add(step.executor);
         agents.set(handle, {
           capabilities: step.capabilities,
           expiresAt: step.expiresAt ?? null,

@@ -23,7 +23,7 @@ export function timeText(ns: bigint | null | undefined): string {
 }
 
 /** Throws when a wallet result reports a failure, so actions surface it. */
-export function ensureOk(result: { failure?: string }) {
+export function ensureOk<T extends { failure?: string }>(result: T): T {
   if (result.failure) throw new Error(result.failure);
   return result;
 }

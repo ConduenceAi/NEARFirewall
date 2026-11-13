@@ -61,7 +61,8 @@ export function parseFinalStatus(status: unknown): Outcome | { status: "error"; 
 
 // ------------------------------------------------------------------ journal
 
-export type OperationState = "prepared" | "submitted" | "settled" | "denied" | "failed" | "uncertain";
+/** `awaiting` means the payment waits for the owner's confirmation ("ask me first"). */
+export type OperationState = "prepared" | "submitted" | "settled" | "denied" | "failed" | "uncertain" | "awaiting";
 
 export interface Operation {
   requestId: string;
@@ -164,6 +165,8 @@ export class OperationJournal {
         return this.update(requestId, { state: "settled" });
       case "failed":
         return this.update(requestId, { state: "failed" });
+      case "awaiting_confirmation":
+        return this.update(requestId, { state: "awaiting" });
       case "denied":
         // A duplicate denial means an earlier attempt reached the payer; resolve it from chain state.
         if (outcome.reason === "DUPLICATE_REQUEST") return this.update(requestId, { state: "uncertain" });
@@ -238,6 +241,10 @@ export class ExecutorClient {
     if (record?.status === "Settled") return { operation: await this.journal.update(requestId, { state: "settled" }) };
     if (record?.status === "Failed") return { operation: await this.journal.update(requestId, { state: "failed" }) };
     if (record?.status === "Pending") return { operation: await this.journal.update(requestId, { state: "uncertain" }) };
+    if (record?.status === "Declined" || record?.status === "Expired") {
+      const reason = record.status === "Declined" ? "CONFIRMATION_DECLINED" : "CONFIRMATION_EXPIRED";
+      return { operation: await this.journal.update(requestId, { state: "denied", reason }) };
+    }
     if (!resubmit) return { operation: op };
     return this.attempt({
       payer: op.payer,

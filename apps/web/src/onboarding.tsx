@@ -9,17 +9,19 @@
  */
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, Check, Copy, Info, X } from "lucide-react";
-import { config, policyOf, registry } from "./config.ts";
+import { policyOf } from "./config.ts";
+import { useWorkspaceRegistry } from "./workspace-registry.tsx";
 import { href } from "./router.ts";
 
-export type StepId = "connect" | "register" | "enable" | "approve" | "run" | "review";
+export type StepId = "connect" | "registry" | "register" | "enable" | "approve" | "link" | "run" | "review";
 
 interface Progress {
-  agents: { agent_id: string; handle: string; executor: string }[];
+  agents: { agent_id: string; handle: string; executor: string | null }[];
   enabled: boolean;
   otherContract: boolean;
   approved: boolean;
   firstPayment: boolean;
+  connected: boolean;
 }
 
 interface Step {
@@ -48,10 +50,11 @@ function writeFlag(account: string, key: string) {
   }
 }
 
-async function loadProgress(accountId: string): Promise<Progress> {
+async function loadProgress(accountId: string, { registry, policyCodeHash }: ReturnType<typeof useWorkspaceRegistry>): Promise<Progress> {
   const policy = policyOf(accountId);
-  const [agents, state] = await Promise.all([registry.agentsOf(accountId), policy.state(config.policyCodeHash)]);
-  const enabled = state.kind === "enabled";
+  const [agents, state] = await Promise.all([registry.agentsOf(accountId), policy.state(policyCodeHash)]);
+  const view = state.kind === "enabled" ? await policy.getPolicy() : null;
+  const enabled = view?.registry === registry.registryId;
   let approved = false;
   let firstPayment = false;
   if (enabled) {
@@ -65,9 +68,10 @@ async function loadProgress(accountId: string): Promise<Progress> {
   return {
     agents: agents.filter((a) => a.status.state !== "removed").map(({ agent_id, handle, executor }) => ({ agent_id, handle, executor })),
     enabled,
-    otherContract: state.kind === "other",
+    otherContract: state.kind === "other" || (view !== null && !enabled),
     approved,
     firstPayment,
+    connected: enabled && (view.connections ?? 0) > 0,
   };
 }
 
@@ -94,21 +98,28 @@ function CopyLine({ text }: { text: string }) {
   );
 }
 
-function buildSteps(accountId: string, p: Progress | undefined): Step[] {
+function buildSteps(accountId: string, p: Progress | undefined, { mode, registry }: ReturnType<typeof useWorkspaceRegistry>): Step[] {
   const agent = p?.agents[0];
   const handle = agent?.handle ?? "<your-agent>";
-  return [
+  const steps: Step[] = [
     {
       id: "connect",
       title: "Connect your wallet",
       todo: "Done. This account owns every agent you register, and it is the account your agents pay from.",
-      why: "NEARFirewall never holds your funds or your keys. Your wallet signs every change to your rules. Agents spend directly from this account, but only within those rules.",
+      why: "Your wallet signs every change to your rules. The policy on this account sends payments within those rules.",
+    },
+    {
+      id: "registry",
+      title: "Create your registry",
+      todo: "Create the agents subaccount and approve its storage deposit in your wallet.",
+      why: "Your registry holds the agent NFTs and checks their identities and capabilities before the policy can pay.",
+      action: { label: "Create my registry", path: "/app/map", target: "create-registry" },
     },
     {
       id: "register",
       title: "Register your agent",
-      todo: "Give the agent a handle and the executor account it runs as, then sign in your wallet.",
-      why: "This is the agent's identity: an NFT that you own. The executor is a separate account whose only key can ask the registry to make a payment. A compromised agent cannot reach your wallet or change its own permissions.",
+      todo: mode === "per-user" ? "Give the agent a handle and set its maximum payment, then sign in your wallet." : "Give the agent a handle and a separate executor account, then sign in your wallet.",
+      why: "The registry mints the agent as an NFT you own. Its capabilities limit what any key can request for it.",
       action: { label: "Register an agent", path: "/app/agents", target: "register-agent" },
     },
     {
@@ -117,7 +128,7 @@ function buildSteps(accountId: string, p: Progress | undefined): Step[] {
       todo: p?.otherContract
         ? "This account already runs a different contract, so NEARFirewall will not install its policy here. Connect an account without a contract."
         : "Choose Enable payments. Your wallet asks you to sign one transaction to your own account.",
-      why: "This installs the payment policy on your own account. It checks every agent request against your rules before any NEAR leaves. Your address and balance stay the same; about 2.4 NEAR is set aside for the contract's storage.",
+      why: "The policy on your account checks each request against your rules. A direct deployment reserves part of your balance for contract storage.",
       action: p?.otherContract ? undefined : { label: "Enable payments", path: "/app/payments", target: "enable-payments" },
     },
     {
@@ -128,12 +139,21 @@ function buildSteps(accountId: string, p: Progress | undefined): Step[] {
       action: { label: "Approve recipients", path: "/app/payments", target: "approve-vendors" },
     },
     {
+      id: "link",
+      title: "Connect your agent",
+      todo: "In Agents, choose Connect and set up a local MCP client. Use its get_rules tool to verify the connection.",
+      why: "The key can call only agent_execute and cannot change your payment rules.",
+      action: { label: "Open Agents", path: "/app/agents" },
+    },
+    {
       id: "run",
       title: "Let the agent make a payment",
       todo: (
         <>
-          <p>Run your agent with its executor key. With the demo runner:</p>
-          <CopyLine text={`npm run runner -- apps/runner/scenarios/readme-limits.json --payer ${accountId} --agent ${handle}${agent ? ` --executor ${agent.executor}` : ""}`} />
+          {agent?.executor ? <>
+            <p>Run the demo with the separate executor account, or request a payment from a connected agent.</p>
+            <CopyLine text={`npm run runner -- apps/runner/scenarios/readme-limits.json --payer ${accountId} --agent ${handle} --executor ${agent.executor} --registry ${registry.registryId}`} />
+          </> : <p>Ask your connected client to preview and pay an approved recipient within your limits.</p>}
           <p className="hint">This step completes when the first payment, or the first blocked attempt, reaches your account.</p>
         </>
       ),
@@ -147,10 +167,12 @@ function buildSteps(accountId: string, p: Progress | undefined): Step[] {
       action: { label: "Open activity", path: "/app/activity" },
     },
   ];
+  return steps.filter((step) => mode === "per-user" || (step.id !== "registry" && step.id !== "link"));
 }
 
-function isDone(id: StepId, p: Progress | undefined, reviewed: boolean): boolean {
+function isDone(id: StepId, p: Progress | undefined, reviewed: boolean, registryReady: boolean): boolean {
   if (id === "connect") return true;
+  if (id === "registry") return registryReady;
   if (!p) return false;
   switch (id) {
     case "register":
@@ -159,6 +181,8 @@ function isDone(id: StepId, p: Progress | undefined, reviewed: boolean): boolean
       return p.enabled;
     case "approve":
       return p.approved;
+    case "link":
+      return p.connected || (p.firstPayment && p.agents.some((agent) => agent.executor));
     case "run":
       return p.firstPayment;
     case "review":
@@ -239,26 +263,28 @@ function goTo(path: string, target?: string) {
   }, 250);
 }
 
-export function OnboardingGuide({ accountId, panel }: { accountId: string; panel: string }) {
+export function OnboardingGuide({ accountId, panel, registryReady }: { accountId: string; panel: string; registryReady: boolean }) {
+  const workspace = useWorkspaceRegistry();
   const [progress, setProgress] = useState<Progress>();
   const [reviewed, setReviewed] = useState(() => readFlag(accountId, "reviewed"));
   const [dismissed, setDismissed] = useState(() => readFlag(accountId, "dismissed"));
   // "Hide the guide" lasts for this page session only; finishing setup dismisses it for good.
   const [hidden, setHidden] = useState(false);
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(!registryReady);
   const [justDone, setJustDone] = useState<string | null>(null);
   const prevDone = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
+    if (!registryReady) return;
     try {
-      setProgress(await loadProgress(accountId));
+      setProgress(await loadProgress(accountId, workspace));
     } catch {
       // Keep the last known progress; the next poll retries.
     }
-  }, [accountId]);
+  }, [accountId, registryReady, workspace]);
 
-  const steps = buildSteps(accountId, progress);
-  const doneFlags = steps.map((s) => isDone(s.id, progress, reviewed));
+  const steps = buildSteps(accountId, progress, workspace);
+  const doneFlags = steps.map((s) => isDone(s.id, progress, reviewed, registryReady));
   const doneCount = doneFlags.filter(Boolean).length;
   const complete = doneCount === steps.length;
   const current = steps.find((_, i) => !doneFlags[i]);

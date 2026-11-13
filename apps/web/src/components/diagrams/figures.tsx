@@ -1,9 +1,23 @@
 /**
- * The four "How it works" figures. They describe the mechanism that is live
- * today: an executor account, the shared registry, and the payment policy on
- * the owner's own account. Update them when the mechanism changes.
+ * The "How it works" figures show the connected-key and separate-executor
+ * paths to the policy on the owner's account.
  */
 import { Diagram, Edge, Lane, Node, Note, StepBadge } from "./Diagram.tsx";
+
+export function ConnectedPayment() {
+  return <Diagram title="A payment from a connected agent" desc="A restricted key asks the policy to pay. The policy asks the registry to authorize the agent, checks the owner's limits and either transfers NEAR, waits for confirmation, or refuses." width={400} height={300}>
+    <Node x={120} y={8} w={160} h={45} label="Connected agent" sub="restricted key" tone="agent" />
+    <Node x={15} y={113} w={158} h={52} label="Your registry" sub="identity and capabilities" tone="contract" />
+    <Node x={227} y={113} w={158} h={52} label="Your account" sub="payment policy" tone="owner" />
+    <Node x={15} y={240} w={158} h={48} label="Owner confirmation" sub="when required" tone="owner" dashed />
+    <Node x={227} y={240} w={158} h={48} label="Approved recipient" sub="receives NEAR" tone="recipient" />
+    <Edge points={[[265, 53], [305, 111]]} kind="call" label="agent_execute" labelAt={[302, 81]} anchor="start" />
+    <Edge points={[[227, 128], [175, 128]]} kind="call" label="authorize" labelAt={[200, 112]} />
+    <Edge points={[[173, 153], [225, 153]]} kind="returns" label="path" labelAt={[200, 171]} />
+    <Edge points={[[305, 165], [305, 238]]} kind="pays" label="NEAR" labelAt={[315, 206]} anchor="start" />
+    <Edge points={[[240, 165], [94, 238]]} kind="call" label="wait if required" labelAt={[153, 194]} />
+  </Diagram>;
+}
 
 /** Figure 1: the parts and who calls whom. */
 export function SystemOverview() {
@@ -90,7 +104,7 @@ export function PaymentLifecycle() {
           available balance. Any failure ends here with a reason.
         </li>
         <li>The amount is reserved against every limit it counts toward, so simultaneous requests can never overspend.</li>
-        <li>Your account sends the NEAR to the recipient.</li>
+        <li>Your account sends the NEAR to the recipient, or holds the reservation for owner confirmation if required.</li>
         <li>The result is recorded. If the transfer failed, the reservation is released and nothing is lost.</li>
         <li>The outcome (settled, failed, or denied with a reason) is the transaction's final value, and it appears in Activity.</li>
       </ol>
@@ -177,6 +191,7 @@ export function CheckLadder() {
           <li>At least one approval covers the agent.</li>
           <li>The account-wide daily cap, if you set one.</li>
           <li>Your available balance, after storage, reservations, and the safety buffer.</li>
+          <li>After these checks pass, an amount above the confirmation threshold waits for the owner.</li>
         </ol>
       </div>
       <figcaption>

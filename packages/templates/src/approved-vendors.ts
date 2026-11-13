@@ -13,12 +13,15 @@ const label = z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])$/, "2-32 ch
 
 export const ApprovedVendorsInput = z.object({
   handle: label,
-  executor: accountId,
+  /** Executor account for `execute`. Leave empty when the agent will connect with a key instead. */
+  executor: accountId.optional(),
   description: z.string().max(512).optional(),
   /** Largest single payment the agent may ever request. */
   maxPerPayment: nearAmount,
   /** Daily budget across every recipient (shared by any leaf agents). */
   dailyBudget: nearAmount,
+  /** Payments above this amount wait for the owner to confirm ("ask me first"). */
+  confirmAbove: nearAmount.optional(),
   recipients: z
     .array(
       z.object({
@@ -31,7 +34,7 @@ export const ApprovedVendorsInput = z.object({
     .min(1, "Add at least one recipient")
     .max(50),
   leaves: z
-    .array(z.object({ label, executor: accountId, maxPerPayment: nearAmount }))
+    .array(z.object({ label, executor: accountId.optional(), maxPerPayment: nearAmount }))
     .max(20)
     .default([]),
   expiresInDays: z.number().int().positive().optional(),
@@ -61,7 +64,7 @@ export const approvedVendors: Template<ApprovedVendorsInput> = {
       {
         kind: "register_agent",
         handle: input.handle,
-        executor: input.executor,
+        executor: input.executor ?? null,
         capabilities: transferCapability(parseNear(input.maxPerPayment)),
         expiresAt,
         locks,
@@ -73,7 +76,7 @@ export const approvedVendors: Template<ApprovedVendorsInput> = {
         kind: "create_child",
         parentHandle: input.handle,
         label: leaf.label,
-        executor: leaf.executor,
+        executor: leaf.executor ?? null,
         capabilities: transferCapability(parseNear(leaf.maxPerPayment)),
         expiresAt,
         locks: input.nonTransferable ? LOCKS.NO_TRANSFER : 0,
@@ -85,6 +88,7 @@ export const approvedVendors: Template<ApprovedVendorsInput> = {
       dailyCap: parseNear(input.dailyBudget),
       expiresAt,
       fixed: input.fixedMandate,
+      confirmAbove: input.confirmAbove ? parseNear(input.confirmAbove) : null,
       recipients: input.recipients.map((r) => ({
         recipient: r.recipient,
         perPaymentCap: parseNear(r.perPayment),

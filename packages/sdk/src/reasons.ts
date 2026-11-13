@@ -29,6 +29,11 @@ export const REASON_TEXT: Record<Reason, string> = {
   MANDATE_DAILY_CAP: "This payment would exceed the agent's daily budget.",
   ACCOUNT_DAILY_CAP: "This payment would exceed the account's daily limit across all agents.",
   INSUFFICIENT_BALANCE: "The account does not have enough available balance.",
+  UNKNOWN_CONNECTION: "This key is not a connected agent key on the account.",
+  AUTHORIZATION_FAILED: "The registry could not be reached to check the agent, so nothing was sent.",
+  CONFIRMATION_DECLINED: "The owner declined this payment, or a recheck at confirmation refused it.",
+  CONFIRMATION_EXPIRED: "Nobody confirmed this payment in time, so it was released.",
+  TOO_MANY_PENDING: "Too many payments are already waiting for the owner's confirmation.",
 };
 
 export function describeReason(reason: Reason): string {

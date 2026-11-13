@@ -12,7 +12,7 @@ export function WalletEntry({ placement }: { placement: "header" | "landing" | "
   if (accountId) {
     return (
       <a className={`btn ${header ? "header-launch header-dashboard" : "primary"}`} href={dashboard} title={header ? `Signed in as ${accountId}` : undefined}>
-        {header ? <><i className="online-dot" aria-hidden="true" /> Dashboard</> : "Open dashboard"}
+        {header ? "Dashboard" : "Open dashboard"}
         <ArrowRight size={16} aria-hidden="true" />
       </a>
     );

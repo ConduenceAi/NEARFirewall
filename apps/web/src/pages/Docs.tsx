@@ -3,7 +3,7 @@ import { Info, Lightbulb, Search, TriangleAlert, X } from "lucide-react";
 import { Topbar } from "../components/Topbar.tsx";
 import { REASON_GROUPS } from "../reasonGroups.ts";
 import { href } from "../router.ts";
-import { CheckLadder, GenerationBinding, PaymentLifecycle, SystemOverview } from "../components/diagrams/index.ts";
+import { CheckLadder, ConnectedPayment, GenerationBinding, PaymentLifecycle, SystemOverview } from "../components/diagrams/index.ts";
 
 interface Section {
   id: string;
@@ -24,13 +24,15 @@ const TOC: Section[] = [
   { id: "generations", title: "Generations and approvals", sub: true },
   { id: "getting-started", title: "Getting started" },
   { id: "connect", title: "1. Connect a wallet", sub: true },
+  { id: "create-registry", title: "Create your registry", sub: true },
   { id: "register", title: "2. Register an agent", sub: true },
   { id: "enable", title: "3. Enable payments", sub: true },
   { id: "approve", title: "4. Approve recipients", sub: true },
+  { id: "ask-me-first", title: "Ask me first", sub: true },
   { id: "run", title: "5. Run the agent", sub: true },
   { id: "integrations", title: "Connect your AI agent" },
-  { id: "integrations-now", title: "Available now", sub: true },
-  { id: "integrations-platforms", title: "Claude, ChatGPT and others", sub: true },
+  { id: "connect-agent", title: "Connect a local MCP client", sub: true },
+  { id: "integrations-now", title: "Use a separate executor", sub: true },
   { id: "managing", title: "Managing agents" },
   { id: "tree", title: "Agent trees", sub: true },
   { id: "pause", title: "Pause, resume, remove", sub: true },
@@ -145,45 +147,40 @@ export function Docs({ section }: { section?: string }) {
         </nav>
 
         <article className="doc" ref={articleRef}>
-          <div className="docs-intro">
-            <div>
-            <h1>NEARFirewall documentation</h1>
-            <p className="lead">Everything you need to let an agent pay from your NEAR account safely, from the first click to day-to-day control.</p>
-            </div>
+          <h1>NEARFirewall documentation</h1>
+          <p className="lead">Everything you need to let an agent pay from your NEAR account safely, from the first click to day-to-day control.</p>
 
-            <div className="docs-search" role="search">
-              <label htmlFor="docs-search-input">Search documentation</label>
-              <div className="docs-search-input">
-                <Search size={18} aria-hidden="true" />
-                <input id="docs-search-input" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by topic or keyword" autoComplete="off" />
-                {query && <button type="button" aria-label="Clear search" onClick={() => setQuery("")}><X size={16} aria-hidden="true" /></button>}
+          <div className="docs-search" role="search">
+            <label htmlFor="docs-search-input">Search documentation</label>
+            <div className="docs-search-input">
+              <Search size={18} aria-hidden="true" />
+              <input id="docs-search-input" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by topic or keyword" autoComplete="off" />
+              {query && <button type="button" aria-label="Clear search" onClick={() => setQuery("")}><X size={16} aria-hidden="true" /></button>}
+            </div>
+            {terms.length > 0 && (
+              <div className="docs-search-results">
+                <p role="status">{results.length === 0 ? "No matching sections found." : `${results.length} ${results.length === 1 ? "section" : "sections"} found`}</p>
+                <ul>
+                  {results.map(({ id, title, text }) => {
+                    const position = text.toLocaleLowerCase().indexOf(terms[0]!);
+                    const start = Math.max(0, position - 45);
+                    const excerpt = text.slice(start, start + 150);
+                    return <li key={id}>
+                      <a href={href(`/docs/${id}`)} onClick={(event) => {
+                        if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+                          setQuery("");
+                          if (section === id) document.getElementById(id)?.scrollIntoView({ block: "start" });
+                        }
+                      }}>
+                        <strong>{title}</strong>
+                        {excerpt && <span>{start > 0 ? "…" : ""}{excerpt}{start + 150 < text.length ? "…" : ""}</span>}
+                      </a>
+                    </li>;
+                  })}
+                </ul>
               </div>
-              {terms.length > 0 && (
-                <div className="docs-search-results">
-                  <p role="status">{results.length === 0 ? "No matching sections found." : `${results.length} ${results.length === 1 ? "section" : "sections"} found`}</p>
-                  <ul>
-                    {results.map(({ id, title, text }) => {
-                      const position = text.toLocaleLowerCase().indexOf(terms[0]!);
-                      const start = Math.max(0, position - 45);
-                      const excerpt = text.slice(start, start + 150);
-                      return <li key={id}>
-                        <a href={href(`/docs/${id}`)} onClick={(event) => {
-                          if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
-                            setQuery("");
-                            if (section === id) document.getElementById(id)?.scrollIntoView({ block: "start" });
-                          }
-                        }}>
-                          <strong>{title}</strong>
-                          {excerpt && <span>{start > 0 ? "…" : ""}{excerpt}{start + 150 < text.length ? "…" : ""}</span>}
-                        </a>
-                      </li>;
-                    })}
-                  </ul>
-                </div>
-              )}
-            </div>
+            )}
           </div>
-
           <h2 id="overview">Overview</h2>
           <p>
             NEARFirewall is a spending policy for AI agents. You keep your normal NEAR account. You register an agent, say who it may
@@ -281,27 +278,31 @@ export function Docs({ section }: { section?: string }) {
           </p>
 
           <h3 id="parts">The parts</h3>
-          <SystemOverview />
+          <ConnectedPayment />
           <ul>
             <li>
               <strong>You (wallet)</strong> sign every change: registering and managing agents in the registry, and setting the rules on your
-              own account. Each change attaches 1 yoctoNEAR, so only your wallet's full key can make it.
+              own account. Policy administration requires a signed owner call with a 1 yoctoNEAR deposit.
             </li>
             <li>
               <strong>The registry</strong> holds every agent as an NFT, with its executor, capabilities, expiry, locks, place in the tree,
-              and generation. It checks who is asking and forwards valid requests.
+              and generation. It checks the requested action against the agent and its ancestors.
             </li>
             <li>
-              <strong>Your account</strong> runs the payment policy: your approvals, recipients, limits, and budgets. It accepts requests only
-              from the registry, checks them, and sends NEAR from your own balance.
+              <strong>Your account</strong> runs the payment policy. It recognizes connected keys, asks the registry to authorize requests,
+              and applies your recipient rules and budgets before sending NEAR from your balance.
             </li>
             <li>
-              <strong>The executor</strong> is the agent's own small account. Its only key can call the registry's <code>execute</code>{" "}
-              method. It cannot send NEAR, change rules, or touch your account.
+              <strong>A connected agent key</strong> can call only <code>agent_execute</code> on your account with zero attached deposit.
+              NEAR enforces its method, receiver, and gas allowance before the policy runs.
             </li>
           </ul>
 
           <h3 id="lifecycle">A payment, step by step</h3>
+          <p>For a connected key, the policy looks up the agent by the signing public key, then calls <code>authorize</code> on your registry.
+            A valid request goes through the policy checks and is reserved before it settles or waits for your confirmation.</p>
+          <p>With a separate executor account, the request starts at the registry and is forwarded to your policy.</p>
+          <SystemOverview />
           <PaymentLifecycle />
           <Callout kind="note">
             <p>
@@ -468,7 +469,7 @@ get_records({ agent_id })             // its public records`}</code>
           </p>
 
           <h2 id="getting-started">Getting started</h2>
-          <p>You need a NEAR account with some balance (Testnet for now), and a second account to act as the agent's executor.</p>
+          <p>You need a named NEAR Testnet account with enough balance for contract storage and payments. A separate executor account is optional.</p>
 
           <h3 id="connect">1. Connect a wallet</h3>
           <ol>
@@ -477,16 +478,19 @@ get_records({ agent_id })             // its public records`}</code>
             </li>
             <li>Pick Meteor or another NEAR wallet and approve the connection.</li>
             <li>
-              Your account appears at the bottom of the left sidebar and the menu (<strong>Agents</strong>, <strong>Payments</strong>,{" "}
-              <strong>Activity</strong>) unlocks.
+              Your account appears in the dashboard header. The sidebar opens the agent map, Agents, Payments, and Activity.
             </li>
           </ol>
           <Callout kind="tip">
             <p>
-              Every change you make asks your wallet to confirm a transaction with a 1 yoctoNEAR deposit. That tiny deposit forces the
-              wallet to ask you, so nothing happens behind your back. The app never adds a function-call key to your account.
+              Your wallet signs setup and rule changes. When you choose Connect on an agent, your wallet also signs the addition of its restricted key.
             </p>
           </Callout>
+
+          <h3 id="create-registry">Create your registry</h3>
+          <p>For a new setup, connect a named account and choose <strong>Create my registry</strong>. One transaction funds storage, installs
+            the registry on <code>agents.&lt;your-account&gt;</code>, and records you as its owner. Only your account can register top-level
+            agents. The subaccount has no access keys. Use a fresh named account if your existing policy trusts another registry.</p>
 
           <h3 id="register">2. Register an agent</h3>
           <ol>
@@ -497,8 +501,7 @@ get_records({ agent_id })             // its public records`}</code>
               Choose a unique <strong>handle</strong>, for example <code>market-agent</code>. Handles cannot be reused.
             </li>
             <li>
-              Enter the <strong>executor account</strong>, the separate NEAR account the agent sends requests from. The form checks
-              that it exists on the current network and links to its NearBlocks record.
+              Leave the executor field empty if you plan to connect an agent key. For a script runner, enter its separate NEAR executor account.
             </li>
             <li>
               Set the <strong>max per payment</strong> capability. This is the agent's own ceiling, whatever you approve later.
@@ -565,7 +568,15 @@ get_records({ agent_id })             // its public records`}</code>
             Usage already counted today is kept.
           </p>
 
+          <h3 id="ask-me-first">Ask me first</h3>
+          <p>In <strong>Payments</strong>, set an optional confirmation threshold on an agent approval. A request above the threshold
+            waits only if it passes the spending rules. The amount is reserved while it waits.</p>
+          <p>Review the amount, recipient, and connection under <strong>Ask me first</strong>. Confirm to have the contract recheck the
+            request and send it, or decline to release the reservation. Requests expire after 24 hours.</p>
+
           <h3 id="run">5. Run the agent</h3>
+          <p>For a local MCP client, follow <a href={href("/docs/connect-agent")}>Connect a local MCP client</a>, then use <code>get_rules</code>,
+            <code> preview_payment</code>, and <code>pay</code> to try a payment within your limits.</p>
           <p>
             The agent submits a typed payment request through its executor account. The registry checks the agent, then forwards the
             request to your account, which checks your rules and pays if everything passes. See{" "}
@@ -595,9 +606,19 @@ npm run runner -- apps/runner/scenarios/tree-1-leaf-pays.json`}</pre>
             </p>
           </Callout>
 
-          <h3 id="integrations-now">Available now: agents you run as code</h3>
+          <h3 id="connect-agent">Connect a local MCP client</h3>
+          <ol>
+            <li>Enable payments and approve recipients. Open the agent in Agents or the agent map and choose <strong>Connect</strong>.</li>
+            <li>Choose your local client, label the connection, and set its gas allowance. Confirm the restricted key in your wallet.</li>
+            <li>Save the key when the app shows it. Use the setup steps and configuration in the panel to run the local MCP server.</li>
+            <li>Use <code>get_rules</code> to verify the connection. Use <code>preview_payment</code> before <code>pay</code>, and
+              <code> check_payment</code> or <code>list_activity</code> to follow the result.</li>
+            <li>To revoke access, select the key beneath the agent in the map and choose <strong>Disconnect key</strong>. Confirm in your wallet.</li>
+          </ol>
+
+          <h3 id="integrations-now">Use a separate executor</h3>
           <p>
-            Today an agent pays through its <strong>executor account</strong>, whose only key can call the registry's <code>execute</code>{" "}
+            A script runner can submit requests from a separate <strong>executor account</strong> using a key that can only call the registry's <code>execute</code>{" "}
             method (see <a href={href("/docs/register")}>Register an agent</a>). Any agent you run as code can use that key: a script, a
             server, or an agent framework. Keep the key in an environment variable or secret store, never in a prompt.
           </p>
@@ -658,83 +679,11 @@ console.log(result.operation.state, result.operation.reason ?? "");`}</pre>
             code. To try it without writing code, use the runner from <a href={href("/docs/run")}>step 5</a>.
           </p>
 
-          <h3 id="integrations-platforms">
-            Claude, ChatGPT and others <span className="badge">Coming soon</span>
-          </h3>
-          <p>
-            Connecting chat assistants, coding agents, and no-code workflow tools directly is the next release. It is not available yet.
-            Here is how it will work:
-          </p>
-          <ol>
-            <li>
-              In the app, open an agent and choose <strong>Connect</strong>. A side panel lists agent platforms: three common ones, plus
-              a search over the rest.
-            </li>
-            <li>
-              Pick a platform. Your browser creates a new key, and your wallet asks you to approve adding it to your account. The key can
-              only ask your payment policy to act for that one agent. It cannot send NEAR directly, change your rules, or call anything
-              else.
-            </li>
-            <li>The app shows the key once, with the exact setup steps for the platform you picked.</li>
-            <li>
-              Every payment is checked against your rules as today, and Activity shows which agent and which connection asked. To stop
-              it, choose <strong>Disconnect</strong>: one signature deletes the key.
-            </li>
-          </ol>
-          <table>
-            <thead>
-              <tr>
-                <th>Platform type</th>
-                <th>Examples</th>
-                <th>How it will connect</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>Chat assistants on your computer</td>
-                <td>Claude Desktop</td>
-                <td>
-                  A local NEARFirewall MCP server, added to the app's MCP settings. The key stays on your computer.
-                </td>
-              </tr>
-              <tr>
-                <td>Coding agents</td>
-                <td>Claude Code, Cursor, VS Code agent mode, Windsurf</td>
-                <td>The same local MCP server.</td>
-              </tr>
-              <tr>
-                <td>Chat assistants on the web</td>
-                <td>Claude.ai, ChatGPT, Microsoft Copilot Studio</td>
-                <td>A remote MCP connector pointing to your own NEARFirewall gateway, a small service you deploy that holds the key.</td>
-              </tr>
-              <tr>
-                <td>Workflow tools</td>
-                <td>n8n, Gumloop, Zapier, Make</td>
-                <td>Their MCP or HTTP request steps, calling your gateway, with the access token kept in the tool's credential store.</td>
-              </tr>
-              <tr>
-                <td>Agent frameworks</td>
-                <td>OpenAI Agents SDK, LangChain, CrewAI, Vercel AI SDK</td>
-                <td>Their MCP client, or the TypeScript SDK as shown above.</td>
-              </tr>
-              <tr>
-                <td>Web3 agent kits</td>
-                <td>NEAR AI agents, ElizaOS</td>
-                <td>The SDK, or HTTP calls to your gateway.</td>
-              </tr>
-            </tbody>
-          </table>
-          <p>
-            Each connected agent gets the same tools on every platform: <code>get_rules</code> (what it may spend),{" "}
-            <code>preview_payment</code> (would this be allowed, and why not), and <code>pay</code>. The platform's own permission prompts
-            still apply on top, for example a chat app asking before it uses a tool.
-          </p>
-
           <h2 id="managing">Managing agents</h2>
 
           <h3 id="tree">Agent trees</h3>
           <p>
-            Select <strong>Add leaf agent</strong> on an agent to create a child. Give it a label, its own executor and a max per payment.
+            Select <strong>Add leaf agent</strong> on an agent to create a child. Give it a label and a max per payment. A separate executor is optional when using a connected key.
             The child is named <code>label.parent</code>, inherits the parent's expiry, and is owned by you.
           </p>
           <ul>
@@ -855,9 +804,9 @@ console.log(result.operation.state, result.operation.reason ?? "");`}</pre>
 
           <h2 id="safety">What can and cannot go wrong</h2>
           <ul>
-            <li>The agent's key can only call the registry. It cannot sign anything for your account.</li>
+            <li>The connected key can only sign zero-deposit calls to agent_execute on your account. A separate executor key can only call execute on the registry.</li>
             <li>The agent cannot pay a recipient you did not approve, or more than the limits, even if it is compromised.</li>
-            <li>The worst case for a leaked executor key is spending inside the limits you set. Pause or revoke to stop it.</li>
+            <li>A leaked key can request payments within your rules and consume its gas allowance. Pause the agent or disconnect its key to stop new requests.</li>
             <li>Simultaneous requests are checked against the same running totals, so they cannot all slip under a cap together.</li>
             <li>A payment that fails after being reserved releases the reservation and is logged as failed.</li>
             <li>Your funds stay on your account. NEARFirewall never takes custody.</li>

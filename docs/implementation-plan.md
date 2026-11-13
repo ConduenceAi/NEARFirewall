@@ -49,11 +49,11 @@ What stays: the contracts' checks, reason codes, branch budgets, the agent map, 
 
 | Phase | Goal | Depends on | Demo v2 | Status |
 | --- | --- | --- | --- | --- |
-| R1 | User-owned registry on `agents.<you>` and shared code published as global contracts | Phase 8 | Required | Not started |
-| R2 | Connections: agent keys on the owner account and `agent_execute` | R1 | Required | Not started |
-| R3 | Connect panel in the app: platform tiles, search, key creation, setup steps, connections on the map | R2 | Required | Not started |
-| R4 | Local MCP server `@nearfirewall/mcp` | R2 | Required | Not started |
-| R5 | "Ask me first" approvals (pending requests approved in the wallet) | R2 | Required | Not started |
+| R1 | User-owned registry on `agents.<you>` and shared code published as global contracts | Phase 8 | Required | Direct deploy implemented and exercised on Testnet via CLI. Global publication remains open. |
+| R2 | Connections: agent keys on the owner account and `agent_execute` | R1 | Required | Implemented and exercised on Testnet via CLI and local MCP. |
+| R3 | Connect panel in the app: platform tiles, search, key creation, setup steps, connections on the map | R2 | Required | Local MCP setup passed a browser smoke test with a mock wallet. Live wallet signing still needs verification. |
+| R4 | Local MCP server `@nearfirewall/mcp` | R2 | Required | Stdio implementation exercised on Testnet with an MCP client. |
+| R5 | "Ask me first" approvals (pending requests approved in the wallet) | R2 | Required | Contract confirmation exercised on Testnet via CLI. Dashboard confirmation and decline passed with a mock wallet. |
 | R6 | Gateway for cloud platforms (remote MCP and HTTP) | R4 | Optional (second platform) | Not started |
 | R7 | Account blocklist, guardian role, and `access.*` browsing rules | R2, R4 | Optional | Not started |
 | R8 | Testnet redeploy, docs, and demo v2 recording | R1–R5 | Required | Not started |
@@ -78,7 +78,7 @@ These override the phase text below wherever they differ.
 | F10 | Done in D0: the outside-project paragraph was removed from the README. |
 | F11 | The docs anchor `connect` belongs to "Connect a wallet", so the new section uses `connect-agent`. In R2, rewrite these statements, which become false: "the app never adds a function-call key" (Docs and the `wallet.tsx` header), and "the agent's key can only call the registry". |
 
-**Docs placeholder.** The Docs page's "Claude, ChatGPT and others" subsection is marked Coming soon. R3 and R4 must replace it with the real Connect panel and MCP steps when they ship.
+The Docs page describes local MCP setup and connected-key payments. The catalog marks platforms that require a gateway or lack verified setup instructions as unavailable.
 
 **Phase D0 (done 2026-11-13).** The Docs page has "How it works", with four figures: the parts, a payment step by step, which rule wins, and generations and approvals. The README has the matching ASCII diagrams. Each later phase adds its own docs section when it ships.
 

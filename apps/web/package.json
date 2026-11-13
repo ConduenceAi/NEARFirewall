@@ -12,6 +12,7 @@
     "@fastnear/near-connect": "^0.14.1",
     "@nearfirewall/sdk": "0.1.0",
     "@nearfirewall/templates": "0.1.0",
+    "@scure/base": "2.3.0",
     "lucide-react": "^1.72.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"

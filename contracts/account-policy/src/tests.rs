@@ -45,6 +45,7 @@ fn rule(recipient: &str, per: u128, daily: u128) -> RecipientInput {
         per_payment_cap: U128(per * NEAR),
         daily_cap: U128(daily * NEAR),
         expires_at: None,
+        confirm_above: None,
     }
 }
 
@@ -73,6 +74,7 @@ fn readme_policy() -> AccountPolicy {
             rule("vendor2.testnet", 2, 4),
             rule("vendor3.testnet", 3, 6),
         ],
+        None,
     );
     p
 }
@@ -394,6 +396,7 @@ fn revoked_and_expired_mandates() {
         Some(T0 + 10),
         false,
         vec![rule("vendor.testnet", 3, 6)],
+        None,
     );
     let later = Run {
         now: T0 + 10,
@@ -439,6 +442,7 @@ fn fixed_mandate_rejects_edits() {
         None,
         true,
         vec![rule("vendor.testnet", 3, 6)],
+        None,
     );
     p.approve_recipient(
         "1".into(),
@@ -460,6 +464,7 @@ fn fixed_mandate_can_be_revoked_and_replaced() {
         None,
         true,
         vec![rule("vendor.testnet", 3, 6)],
+        None,
     );
     p.revoke_mandate("1".into());
     p.set_mandate(
@@ -469,6 +474,7 @@ fn fixed_mandate_can_be_revoked_and_replaced() {
         None,
         true,
         vec![rule("vendor.testnet", 1, 2)],
+        None,
     );
     assert_eq!(
         exec(&mut p, "vendor.testnet", 2, 1),
@@ -550,6 +556,7 @@ fn account_daily_cap_spans_agents() {
         None,
         false,
         vec![rule("vendor.testnet", 3, 6)],
+        None,
     );
     p.set_account_daily_cap(Some(U128(4 * NEAR)));
     assert_eq!(exec(&mut p, "vendor.testnet", 3, 1), settled(1));
@@ -623,6 +630,7 @@ fn branch_pool_is_shared_by_leaves() {
         None,
         false,
         vec![rule("vendor.testnet", 3, 6), rule("vendor2.testnet", 2, 4)],
+        None,
     );
     let bot1 = || Run {
         path: vec![node("1", 1), node("2", 2)],
@@ -653,6 +661,7 @@ fn branch_pool_is_shared_by_leaves() {
         None,
         false,
         vec![rule("vendor.testnet", 3, 9)],
+        None,
     );
     assert_eq!(
         exec_with(&mut p, bot2(), "vendor.testnet", 1, 1),
@@ -671,6 +680,7 @@ fn leaf_mandate_and_branch_mandate_both_apply() {
         None,
         false,
         vec![rule("vendor.testnet", 3, 9)],
+        None,
     );
     p.set_mandate(
         "2".into(),
@@ -679,6 +689,7 @@ fn leaf_mandate_and_branch_mandate_both_apply() {
         None,
         false,
         vec![rule("vendor.testnet", 1, 2)],
+        None,
     );
     let leaf = || Run {
         path: vec![node("1", 1), node("2", 2)],
@@ -721,6 +732,7 @@ fn transferring_an_ancestor_voids_branch_and_leaf_mandates() {
         None,
         false,
         vec![rule("vendor.testnet", 3, 6)],
+        None,
     );
     let moved = Run {
         path: vec![node("1", 9), node("2", 2)],
@@ -781,6 +793,7 @@ fn activity_ring_buffer_is_bounded_and_newest_first() {
         None,
         false,
         vec![rule("vendor.testnet", 1, 1000)],
+        None,
     );
     for n in 0..(ACTIVITY_SIZE + 6) {
         exec(&mut p, "vendor.testnet", 1, n);
@@ -848,4 +861,628 @@ fn on_settle_reads_the_promise_result() {
         p.on_settle(request_key("1", &rid(1))),
         Outcome::Failed { request_id: rid(1) }
     );
+}
+
+// ---------------------------------------------------------------- connections (R2)
+
+use near_sdk::{CurveType, Gas};
+
+fn agent_key(byte: u8) -> PublicKey {
+    PublicKey::from_parts(CurveType::ED25519, vec![byte; 32]).unwrap()
+}
+
+/// A transaction signed on alice's own account with `key`, calling alice.
+fn as_key(key: &PublicKey, now: u64, gas_tgas: u64) {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(alice())
+        .signer_account_id(alice())
+        .predecessor_account_id(alice())
+        .signer_account_pk(key.clone())
+        .prepaid_gas(Gas::from_tgas(gas_tgas))
+        .block_timestamp(now)
+        .storage_usage(10_000)
+        .account_balance(NearToken::from_yoctonear(100 * NEAR));
+    testing_env!(b.build());
+}
+
+/// A callback receipt on alice with one promise result.
+fn as_callback(now: u64) {
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(alice())
+        .predecessor_account_id(alice())
+        .block_timestamp(now)
+        .storage_usage(10_000)
+        .account_balance(NearToken::from_yoctonear(100 * NEAR));
+    testing_env!(
+        b.build(),
+        near_sdk::test_vm_config(),
+        near_sdk::RuntimeFeesConfig::test(),
+        Default::default(),
+        vec![PromiseResult::Successful(vec![])]
+    );
+}
+
+fn pay(recipient: &str, amount_near: u128) -> Action {
+    Action::TransferNear {
+        recipient: acc(recipient),
+        amount: U128(amount_near * NEAR),
+    }
+}
+
+fn connected_policy() -> (AccountPolicy, PublicKey) {
+    let mut p = readme_policy();
+    let key = agent_key(7);
+    as_owner(T0);
+    p.connect_agent_key(
+        "1".into(),
+        key.clone(),
+        "claude-desktop".into(),
+        "Claude on laptop".into(),
+    );
+    (p, key)
+}
+
+fn allowed(path: Vec<PathNode>) -> Result<Authorization, PromiseError> {
+    Ok(Authorization::Allowed { path })
+}
+
+/// Runs the registry's answer through `on_authorized`, then settles a dispatched transfer.
+fn through_connection(
+    p: &mut AccountPolicy,
+    key: &PublicKey,
+    auth: Result<Authorization, PromiseError>,
+    recipient: &str,
+    amount: u128,
+    request: u64,
+) -> Outcome {
+    as_callback(T0);
+    match p.on_authorized(
+        String::from(key),
+        pay(recipient, amount),
+        rid(request),
+        Some("Claude Desktop".into()),
+        auth,
+    ) {
+        PromiseOrValue::Value(outcome) => outcome,
+        PromiseOrValue::Promise(_) => p.settle(&request_key("1", &rid(request)), true),
+    }
+}
+
+#[test]
+fn connections_are_recorded_and_listed() {
+    let (mut p, key) = connected_policy();
+    let all = p.get_connections(None);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].agent_id, "1");
+    assert_eq!(all[0].platform, "claude-desktop");
+    assert_eq!(p.get_connections(Some("2".into())).len(), 0);
+    assert_eq!(
+        p.get_connection(key.clone()).unwrap().label,
+        "Claude on laptop"
+    );
+    assert_eq!(p.get_policy().connections, 1);
+    as_owner(T0);
+    p.disconnect_agent_key(key.clone());
+    assert!(p.get_connection(key).is_none());
+    assert_eq!(p.get_policy().connections, 0);
+}
+
+#[test]
+#[should_panic(expected = "This key is already connected")]
+fn a_key_connects_once() {
+    let (mut p, key) = connected_policy();
+    as_owner(T0);
+    p.connect_agent_key("1".into(), key, "n8n".into(), "again".into());
+}
+
+#[test]
+#[should_panic(expected = "Only the account itself can change its policy")]
+fn only_the_owner_connects_keys() {
+    let mut p = readme_policy();
+    set_env(registry(), 1, T0, 100);
+    p.connect_agent_key("1".into(), agent_key(1), "n8n".into(), "x".into());
+}
+
+#[test]
+#[should_panic(expected = "Too many connections for this agent")]
+fn connections_per_agent_are_limited() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    for i in 0..=MAX_CONNECTIONS_PER_AGENT as u8 {
+        p.connect_agent_key(
+            "1".into(),
+            agent_key(i + 1),
+            "custom".into(),
+            format!("key {i}"),
+        );
+    }
+}
+
+#[test]
+fn unknown_keys_and_other_signers_are_refused() {
+    let (mut p, _) = connected_policy();
+    as_key(&agent_key(99), T0, 120);
+    assert!(matches!(
+        p.agent_execute(pay("vendor.testnet", 1), rid(1), None),
+        PromiseOrValue::Value(Outcome::Denied {
+            reason: Reason::UnknownConnection,
+            ..
+        })
+    ));
+    // A self-call started by someone else's transaction carries a stranger's key.
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(alice())
+        .predecessor_account_id(alice())
+        .signer_account_id(acc("relayer.testnet"))
+        .signer_account_pk(agent_key(7))
+        .prepaid_gas(Gas::from_tgas(120));
+    testing_env!(b.build());
+    assert!(matches!(
+        p.agent_execute(pay("vendor.testnet", 1), rid(2), None),
+        PromiseOrValue::Value(Outcome::Denied {
+            reason: Reason::UnknownConnection,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn a_connected_key_asks_the_registry() {
+    let (mut p, key) = connected_policy();
+    as_key(&key, T0, 120);
+    assert!(matches!(
+        p.agent_execute(pay("vendor.testnet", 1), rid(1), None),
+        PromiseOrValue::Promise(_)
+    ));
+    // Nothing is reserved until the registry answers.
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+}
+
+#[test]
+#[should_panic(expected = "Attach at least 90 Tgas")]
+fn agent_execute_needs_enough_gas() {
+    let (mut p, key) = connected_policy();
+    as_key(&key, T0, 30);
+    let _ = p.agent_execute(pay("vendor.testnet", 1), rid(1), None);
+}
+
+#[test]
+fn an_authorized_connection_pays_and_is_attributed() {
+    let (mut p, key) = connected_policy();
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("1", 10)]),
+            "vendor.testnet",
+            2,
+            1
+        ),
+        settled(1)
+    );
+    let activity = &p.get_activity(None, Some(1))[0];
+    assert_eq!(activity.outcome, "settled");
+    assert_eq!(
+        activity.via,
+        Some(Via::Connection {
+            public_key: String::from(&key),
+            label: "Claude on laptop".into()
+        })
+    );
+    assert_eq!(activity.client.as_deref(), Some("Claude Desktop"));
+    let connection = p.get_connection(key).unwrap();
+    assert_eq!(connection.uses, 1);
+    assert!(connection.last_used.is_some());
+}
+
+#[test]
+fn the_registry_refusal_is_recorded() {
+    let (mut p, key) = connected_policy();
+    let refusal = Ok(Authorization::Denied {
+        reason: Reason::BranchPaused,
+        detail: None,
+    });
+    assert_eq!(
+        through_connection(&mut p, &key, refusal, "vendor.testnet", 1, 1),
+        denied(Reason::BranchPaused)
+    );
+    assert_eq!(
+        p.get_activity(None, Some(1))[0].reason,
+        Some(Reason::BranchPaused)
+    );
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+}
+
+#[test]
+fn a_failed_registry_call_fails_closed() {
+    let (mut p, key) = connected_policy();
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            Err(PromiseError::Failed),
+            "vendor.testnet",
+            1,
+            1
+        ),
+        denied(Reason::AuthorizationFailed)
+    );
+}
+
+#[test]
+fn a_path_for_another_agent_is_refused() {
+    let (mut p, key) = connected_policy();
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("2", 3)]),
+            "vendor.testnet",
+            1,
+            1
+        ),
+        denied(Reason::InvalidRequest)
+    );
+}
+
+#[test]
+fn a_key_disconnected_meanwhile_is_refused() {
+    let (mut p, key) = connected_policy();
+    as_owner(T0);
+    p.disconnect_agent_key(key.clone());
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("1", 10)]),
+            "vendor.testnet",
+            1,
+            1
+        ),
+        denied(Reason::UnknownConnection)
+    );
+}
+
+#[test]
+fn connection_rules_are_the_same_rules() {
+    let (mut p, key) = connected_policy();
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("1", 10)]),
+            "attacker.testnet",
+            1,
+            1
+        ),
+        denied(Reason::RecipientNotApproved)
+    );
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("1", 10)]),
+            "vendor.testnet",
+            4,
+            2
+        ),
+        denied(Reason::PerPaymentCap)
+    );
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("1", 11)]),
+            "vendor.testnet",
+            1,
+            3
+        ),
+        denied(Reason::MandateStale)
+    );
+}
+
+#[test]
+fn the_same_request_id_pays_once_across_the_async_hop() {
+    let (mut p, key) = connected_policy();
+    as_callback(T0);
+    assert!(matches!(
+        p.on_authorized(
+            String::from(&key),
+            pay("vendor.testnet", 1),
+            rid(1),
+            None,
+            allowed(vec![node("1", 10)])
+        ),
+        PromiseOrValue::Promise(_)
+    ));
+    as_callback(T0);
+    assert!(matches!(
+        p.on_authorized(
+            String::from(&key),
+            pay("vendor.testnet", 1),
+            rid(1),
+            None,
+            allowed(vec![node("1", 10)])
+        ),
+        PromiseOrValue::Value(Outcome::Denied {
+            reason: Reason::DuplicateRequest,
+            ..
+        })
+    ));
+    assert_eq!(p.get_policy().reserved_total, U128(NEAR));
+}
+
+#[test]
+#[should_panic(expected = "Expected one promise result")]
+fn on_settle_needs_exactly_one_result() {
+    let mut p = readme_policy();
+    exec_with(
+        &mut p,
+        Run {
+            settle: None,
+            ..Run::default()
+        },
+        "vendor.testnet",
+        2,
+        1,
+    );
+    set_env(alice(), 0, T0, 100);
+    p.on_settle(request_key("1", &rid(1)));
+}
+
+// ---------------------------------------------------------------- "ask me first" (R5)
+
+/// vendor and vendor2 at 5 per payment and 9 per day, with confirmation above 4 NEAR.
+fn confirming_policy() -> AccountPolicy {
+    let mut p = new_policy();
+    as_owner(T0);
+    p.set_mandate(
+        "1".into(),
+        vec![node("1", 10)],
+        U128(20 * NEAR),
+        None,
+        false,
+        vec![rule("vendor.testnet", 5, 9), rule("vendor2.testnet", 5, 9)],
+        Some(U128(4 * NEAR)),
+    );
+    p
+}
+
+fn awaiting(p: &mut AccountPolicy, recipient: &str, amount: u128, request: u64) -> u64 {
+    match exec(p, recipient, amount, request) {
+        Outcome::AwaitingConfirmation { expires_at, .. } => expires_at,
+        other => panic!("expected awaiting confirmation, got {other:?}"),
+    }
+}
+
+#[test]
+fn payments_above_the_threshold_wait_and_reserve() {
+    let mut p = confirming_policy();
+    assert_eq!(exec(&mut p, "vendor.testnet", 3, 1), settled(1));
+    let expires_at = awaiting(&mut p, "vendor.testnet", 5, 2);
+    assert_eq!(expires_at, T0 + CONFIRM_WINDOW_NS);
+    let pending = p.get_pending();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].amount, U128(5 * NEAR));
+    assert_eq!(p.get_policy().reserved_total, U128(5 * NEAR));
+    assert_eq!(p.get_policy().pending, 1);
+    // Reserved amounts count against the caps: 3 + 5 + 2 > 9.
+    assert_eq!(
+        exec(&mut p, "vendor.testnet", 2, 3),
+        denied(Reason::RecipientDailyCap)
+    );
+    assert_eq!(p.get_activity(None, Some(5))[1].outcome, "awaiting");
+}
+
+#[test]
+fn caps_deny_before_anything_waits() {
+    let mut p = confirming_policy();
+    assert_eq!(
+        exec(&mut p, "vendor.testnet", 6, 1),
+        denied(Reason::PerPaymentCap)
+    );
+    assert!(p.get_pending().is_empty());
+}
+
+#[test]
+fn a_recipient_threshold_applies_to_that_recipient() {
+    let mut p = new_policy();
+    as_owner(T0);
+    let mut strict = rule("vendor.testnet", 5, 9);
+    strict.confirm_above = Some(U128(NEAR));
+    p.set_mandate(
+        "1".into(),
+        vec![node("1", 10)],
+        U128(20 * NEAR),
+        None,
+        false,
+        vec![strict, rule("vendor2.testnet", 5, 9)],
+        None,
+    );
+    awaiting(&mut p, "vendor.testnet", 2, 1);
+    assert_eq!(exec(&mut p, "vendor2.testnet", 2, 2), settled(2));
+}
+
+#[test]
+fn the_threshold_can_be_changed_later() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    p.set_confirm_above("1".into(), None, Some(U128(NEAR)));
+    awaiting(&mut p, "vendor.testnet", 2, 1);
+    as_owner(T0);
+    p.set_confirm_above("1".into(), None, None);
+    assert_eq!(exec(&mut p, "vendor.testnet", 2, 2), settled(2));
+}
+
+#[test]
+fn confirming_sends_the_payment() {
+    let mut p = confirming_policy();
+    awaiting(&mut p, "vendor.testnet", 5, 1);
+    as_owner(T0 + 10);
+    assert!(matches!(
+        p.confirm("1".into(), rid(1), None),
+        PromiseOrValue::Promise(_)
+    ));
+    as_callback(T0 + 20);
+    let key = request_key("1", &rid(1));
+    assert!(matches!(
+        p.on_confirm_authorized(key.clone(), allowed(vec![node("1", 10)])),
+        PromiseOrValue::Promise(_)
+    ));
+    assert!(p.get_pending().is_empty());
+    assert_eq!(
+        p.get_request("1".into(), rid(1)).unwrap().status,
+        RequestStatus::Pending
+    );
+    assert_eq!(p.settle(&key, true), settled(1));
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+    assert_eq!(
+        p.get_usage("1".into(), None).mandate_used_today,
+        U128(5 * NEAR)
+    );
+}
+
+#[test]
+fn a_stale_approval_at_confirmation_releases_the_reservation() {
+    let mut p = confirming_policy();
+    awaiting(&mut p, "vendor.testnet", 5, 1);
+    as_callback(T0 + 20);
+    let outcome = p.on_confirm_authorized(request_key("1", &rid(1)), allowed(vec![node("1", 11)]));
+    assert!(matches!(
+        outcome,
+        PromiseOrValue::Value(Outcome::Denied {
+            reason: Reason::MandateStale,
+            ..
+        })
+    ));
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+    assert_eq!(p.get_usage("1".into(), None).mandate_used_today, U128(0));
+    assert_eq!(
+        p.get_request("1".into(), rid(1)).unwrap().status,
+        RequestStatus::Declined
+    );
+}
+
+#[test]
+#[should_panic(expected = "Payments are paused")]
+fn confirming_while_paused_is_refused() {
+    let mut p = confirming_policy();
+    awaiting(&mut p, "vendor.testnet", 5, 1);
+    as_owner(T0);
+    p.pause();
+    let _ = p.confirm("1".into(), rid(1), None);
+}
+
+#[test]
+fn declining_releases_and_keeps_the_id_used() {
+    let mut p = confirming_policy();
+    awaiting(&mut p, "vendor.testnet", 5, 1);
+    as_owner(T0);
+    assert_eq!(
+        p.decline("1".into(), rid(1)),
+        denied(Reason::ConfirmationDeclined)
+    );
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+    assert!(p.get_pending().is_empty());
+    assert_eq!(
+        exec(&mut p, "vendor.testnet", 1, 1),
+        denied(Reason::DuplicateRequest)
+    );
+    assert_eq!(p.get_activity(None, Some(1))[0].outcome, "declined");
+}
+
+#[test]
+#[should_panic(expected = "This payment has not expired yet")]
+fn expiry_only_after_the_deadline() {
+    let mut p = confirming_policy();
+    awaiting(&mut p, "vendor.testnet", 5, 1);
+    set_env(acc("anyone.testnet"), 0, T0 + 5, 100);
+    p.expire("1".into(), rid(1));
+}
+
+#[test]
+fn anyone_can_expire_after_the_deadline() {
+    let mut p = confirming_policy();
+    let expires_at = awaiting(&mut p, "vendor.testnet", 5, 1);
+    set_env(acc("anyone.testnet"), 0, expires_at, 100);
+    assert_eq!(
+        p.expire("1".into(), rid(1)),
+        denied(Reason::ConfirmationExpired)
+    );
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+    assert_eq!(
+        p.get_request("1".into(), rid(1)).unwrap().status,
+        RequestStatus::Expired
+    );
+}
+
+#[test]
+fn overdue_confirmations_expire_lazily() {
+    let mut p = confirming_policy();
+    let expires_at = awaiting(&mut p, "vendor.testnet", 5, 1);
+    let later = Run {
+        now: expires_at + 1,
+        ..Run::default()
+    };
+    assert_eq!(
+        exec_with(&mut p, later, "vendor2.testnet", 1, 2),
+        settled(2)
+    );
+    assert!(p.get_pending().is_empty());
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+}
+
+#[test]
+fn waiting_payments_per_agent_are_limited() {
+    let mut p = new_policy();
+    as_owner(T0);
+    p.set_mandate(
+        "1".into(),
+        vec![node("1", 10)],
+        U128(1000 * NEAR),
+        None,
+        false,
+        vec![rule("vendor.testnet", 10, 1000)],
+        Some(U128(NEAR)),
+    );
+    for i in 0..MAX_PENDING_PER_AGENT as u64 {
+        awaiting(&mut p, "vendor.testnet", 2, i);
+    }
+    assert_eq!(
+        exec(&mut p, "vendor.testnet", 2, 99),
+        denied(Reason::TooManyPending)
+    );
+}
+
+#[test]
+fn pruning_continues_while_payments_wait() {
+    let mut p = confirming_policy();
+    assert_eq!(exec(&mut p, "vendor.testnet", 1, 1), settled(1));
+    awaiting(&mut p, "vendor.testnet", 5, 2);
+    let later = Run {
+        now: T0 + REQUEST_RETENTION_NS + 1,
+        ..Run::default()
+    };
+    // The waiting payment expired lazily and the old settled request was pruned.
+    assert_eq!(
+        exec_with(&mut p, later, "vendor2.testnet", 1, 3),
+        settled(3)
+    );
+    assert!(p.get_request("1".into(), rid(1)).is_none());
+}
+
+#[test]
+fn preview_reports_when_confirmation_is_needed() {
+    let p = confirming_policy();
+    set_env(acc("anyone.testnet"), 0, T0, 100);
+    let ctx = ExecContext {
+        path: vec![node("1", 10)],
+        executor: acc("runner.testnet"),
+        action: pay("vendor.testnet", 5),
+        request_id: rid(1),
+        expected_revision: None,
+    };
+    let preview = p.preview(ctx);
+    assert!(preview.allowed);
+    assert!(preview.needs_confirmation);
 }

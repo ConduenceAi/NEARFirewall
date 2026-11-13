@@ -12,26 +12,32 @@ import { AlertTriangle, ArrowRight, Check, CircleDashed, ExternalLink, Info, X }
 import {
   LOCKS,
   describeReason,
+  disconnectAgentKey,
   pauseAgent,
   pausePayments,
   removeRecipient,
   resumeAgent,
   resumePayments,
   type AgentView,
+  type Connection,
   type Mandate,
   type PathNode,
   type WalletTransaction,
 } from "@nearfirewall/sdk";
-import { config, explorerAccount, explorerContract, explorerNft, policyOf, registry } from "../config.ts";
+import { explorerAccount, explorerContract, explorerNft, policyOf, rpc } from "../config.ts";
+import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { capText, ensureOk, near, statusText, timeText } from "../format.ts";
 import { useAction, useAsync } from "../hooks.ts";
 import { href } from "../router.ts";
+import { platforms } from "../platforms.ts";
 import { useWallet } from "../wallet.tsx";
 import type { MapData } from "./AgentMap.tsx";
 
 export type Selection =
   | { kind: "account" }
+  | { kind: "registry" }
   | { kind: "agent"; agent: AgentView }
+  | { kind: "connection"; connection: Connection }
   | { kind: "recipient"; owner: AgentView; account: string };
 
 interface Gap {
@@ -94,7 +100,8 @@ function AccountLink({ account }: { account: string }) {
 }
 
 function AgentLink({ id, label }: { id: string; label?: string }) {
-  return <ExplorerLink url={explorerNft(config.registryId, id)}>{label ?? `#${id}`}</ExplorerLink>;
+  const { registry } = useWorkspaceRegistry();
+  return <ExplorerLink url={explorerNft(registry.registryId, id)}>{label ?? `#${id}`}</ExplorerLink>;
 }
 
 function Section({ title, explorerUrl, children }: { title: string; explorerUrl?: string; children: ReactNode }) {
@@ -111,11 +118,13 @@ export function Inspector({
   data,
   onClose,
   onChanged,
+  onConnect,
 }: {
   selection: Selection;
   data: MapData;
   onClose(): void;
   onChanged(): void;
+  onConnect(agent: AgentView): void;
 }) {
   const { send } = useWallet();
   const action = useAction();
@@ -129,16 +138,18 @@ export function Inspector({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const title =
-    selection.kind === "account" ? data.account : selection.kind === "agent" ? selection.agent.handle : selection.account;
-  const kindLabel = selection.kind === "account" ? "Your account" : selection.kind === "agent" ? "Agent" : "Recipient";
+  const labels = { account: "Your account", registry: "Registry", agent: "Agent", connection: "Connection", recipient: "Recipient" };
+  const title = selection.kind === "agent" ? <AgentLink id={selection.agent.agent_id} label={selection.agent.handle} />
+    : selection.kind === "connection" ? selection.connection.label
+    : <AccountLink account={selection.kind === "account" ? data.account : selection.kind === "registry" ? data.registryId : selection.account} />;
+  const kindLabel = labels[selection.kind];
 
   return (
     <aside className="inspector" aria-label={`${kindLabel} details`}>
       <header className="insp-head">
         <div className="insp-heading">
           <span className="eyebrow">{kindLabel}</span>
-          <h2>{selection.kind === "agent" ? <AgentLink id={selection.agent.agent_id} label={title} /> : <AccountLink account={title} />}</h2>
+          <h2>{title}</h2>
         </div>
         <button type="button" className="icon-btn" onClick={onClose} aria-label="Close details" title="Close">
           <X size={17} />
@@ -147,7 +158,12 @@ export function Inspector({
       <div className="insp-body">
         {action.message && <p className={`notice ${action.message.kind}`}>{action.message.text}</p>}
         {selection.kind === "account" && <AccountDetails data={data} busy={action.busy} exec={exec} />}
-        {selection.kind === "agent" && <AgentDetails agent={selection.agent} data={data} busy={action.busy} exec={exec} />}
+        {selection.kind === "registry" && <Section title="Agent registry" explorerUrl={explorerContract(data.registryId)}>
+          <p>The registry stores agent identities, their hierarchy, and the capabilities that cap each payment request.</p>
+          <Facts rows={[["Agents held", data.agents.length], ["Trusted by your policy", data.policy?.registry === data.registryId ? "Yes" : "Policy inactive"]]} />
+        </Section>}
+        {selection.kind === "agent" && <AgentDetails agent={selection.agent} data={data} busy={action.busy} exec={exec} onConnect={onConnect} />}
+        {selection.kind === "connection" && <ConnectionDetails key={selection.connection.public_key} connection={selection.connection} data={data} onChanged={onChanged} />}
         {selection.kind === "recipient" && (
           <RecipientDetails owner={selection.owner} account={selection.account} data={data} busy={action.busy} exec={exec} />
         )}
@@ -157,6 +173,42 @@ export function Inspector({
 }
 
 type Exec = (label: string, tx: WalletTransaction) => Promise<void>;
+
+function ConnectionDetails({ connection, data, onChanged }: { connection: Connection; data: MapData; onChanged(): void }) {
+  const { send } = useWallet();
+  const action = useAction();
+  const policy = policyOf(data.account);
+  const activity = useAsync(async () => (await policy.getActivity(64)).filter((a) => a.via?.kind === "connection" && a.via.public_key === connection.public_key).slice(0, 6), [data, connection.public_key]);
+  const platform = platforms.find((p) => p.id === connection.platform);
+  const client = activity.data?.find((a) => a.client)?.client;
+  const reportedName = client?.toLowerCase();
+  const mismatch = reportedName && platform && platform.id !== "custom" && !reportedName.includes(platform.name.toLowerCase().split(" ")[0]!);
+  const disconnect = () => action.run("Disconnect agent", async () => {
+    const keys = await rpc.viewAccessKeys(data.account);
+    ensureOk(await send(disconnectAgentKey(data.account, connection.public_key, { keyPresent: keys.some((k) => k.publicKey === connection.public_key) })));
+    onChanged();
+  });
+  return <>
+    <Facts rows={[
+      ["Agent", <AgentLink id={connection.agent_id} label={data.agents.find((a) => a.agent_id === connection.agent_id)?.handle} />],
+      ["Platform", platform?.name ?? connection.platform],
+      ["Public key", <code>{connection.public_key}</code>],
+      ["Created", timeText(connection.created_at)],
+      ["Last used", timeText(connection.last_used)],
+      ["Requests", connection.uses],
+      ["Reported client", client ?? "None reported"],
+    ]} />
+    {mismatch && <p className="hint">The reported client differs from the selected platform. The client supplies this name.</p>}
+    <Section title="Recent activity">
+      {activity.error && <p className="notice error">{activity.error}</p>}
+      {activity.data?.length ? <ul className="insp-list">{activity.data.map((a) => (
+        <li key={a.seq.toString()}>{near(a.amount)} → <AccountLink account={a.recipient} /> · {a.outcome === "awaiting" ? "waiting for confirmation" : a.outcome}{a.reason ? ` · ${describeReason(a.reason)}` : ""}</li>
+      ))}</ul> : <p className="hint">{activity.loading ? "Loading…" : "No recent requests from this key."}</p>}
+    </Section>
+    <div className="insp-actions"><button type="button" className="danger" disabled={action.busy} onClick={() => void disconnect()}>Disconnect key</button></div>
+    {action.message && <p role="status" className={`notice ${action.message.kind}`}>{action.message.text}</p>}
+  </>;
+}
 
 // ------------------------------------------------------------------ account
 
@@ -239,7 +291,7 @@ interface PathEntry {
   stale: boolean;
 }
 
-async function loadAgentDetail(data: MapData, agent: AgentView) {
+async function loadAgentDetail(data: MapData, agent: AgentView, registry: ReturnType<typeof useWorkspaceRegistry>["registry"]) {
   const path = await registry.getPath(agent.agent_id);
   const known = new Map(data.agents.map((a) => [a.agent_id, a]));
   const policy = policyOf(data.account);
@@ -279,8 +331,9 @@ function minBig(values: bigint[]): bigint | null {
   return values.length === 0 ? null : values.reduce((a, b) => (b < a ? b : a));
 }
 
-function AgentDetails({ agent, data, busy, exec }: { agent: AgentView; data: MapData; busy: boolean; exec: Exec }) {
-  const detail = useAsync(() => loadAgentDetail(data, agent), [agent, data]);
+function AgentDetails({ agent, data, busy, exec, onConnect }: { agent: AgentView; data: MapData; busy: boolean; exec: Exec; onConnect(agent: AgentView): void }) {
+  const { registry, mode } = useWorkspaceRegistry();
+  const detail = useAsync(() => loadAgentDetail(data, agent, registry), [agent, data, registry]);
   const d = detail.data;
   const now = BigInt(Date.now()) * 1_000_000n;
 
@@ -423,8 +476,8 @@ function AgentDetails({ agent, data, busy, exec }: { agent: AgentView; data: Map
           rows={[
             ["Token ID", <AgentLink id={agent.agent_id} />],
             ["Holder", agent.holder ? <AccountLink account={agent.holder} /> : "none (removed)"],
-            ["Executor", <AccountLink account={agent.executor} />],
-            ["Registry", <ExplorerLink url={explorerContract(config.registryId)}>{config.registryId}</ExplorerLink>],
+            ["Executor", agent.executor ? <AccountLink account={agent.executor} /> : "None configured"],
+            ["Registry", <ExplorerLink url={explorerContract(data.registryId)}>{data.registryId}</ExplorerLink>],
             ["Status", statusText(agent)],
             ["Can request", capText(agent.capabilities)],
             ["Expires", timeText(agent.expires_at)],
@@ -446,7 +499,7 @@ function AgentDetails({ agent, data, busy, exec }: { agent: AgentView; data: Map
             {holders.length > 1 ? "Holders of this agent and its ancestors." : null}
           </li>
           <li>
-            <strong>Can request payments:</strong> its executor, <AccountLink account={agent.executor} />, with a key limited to the registry
+            <strong>Can request payments:</strong> {mode !== "legacy" && "Connected keys"}{agent.executor && <>{mode !== "legacy" ? " and " : ""}<AccountLink account={agent.executor} /></>}
           </li>
           <li>
             <strong>Can be charged:</strong> {agent.holder ? <AccountLink account={agent.holder} /> : "No current holder"}{agent.holder === data.account ? " (yours)" : ""}
@@ -495,13 +548,14 @@ function AgentDetails({ agent, data, busy, exec }: { agent: AgentView; data: Map
       )}
 
       <div className="insp-actions">
+        {mode !== "legacy" && agent.status.state !== "removed" && <button type="button" disabled={busy} onClick={() => onConnect(agent)}>Connect</button>}
         {agent.status.state !== "removed" &&
           (paused ? (
-            <button disabled={busy} onClick={() => void exec("Resume", resumeAgent(config.registryId, agent.agent_id))}>
+            <button disabled={busy} onClick={() => void exec("Resume", resumeAgent(data.registryId, agent.agent_id))}>
               Resume agent
             </button>
           ) : (
-            <button disabled={busy} onClick={() => void exec("Pause", pauseAgent(config.registryId, agent.agent_id))}>
+            <button disabled={busy} onClick={() => void exec("Pause", pauseAgent(data.registryId, agent.agent_id))}>
               Pause agent and its branch
             </button>
           ))}

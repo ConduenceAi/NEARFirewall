@@ -15,14 +15,16 @@ import {
   transferCapability,
   type AgentView,
 } from "@nearfirewall/sdk";
-import { config, explorerAccount, registry, rpc } from "../config.ts";
+import { config, explorerAccount, rpc } from "../config.ts";
+import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { capText, ensureOk, statusText, timeText } from "../format.ts";
 import { useAction, useAsync } from "../hooks.ts";
 import { useWallet } from "../wallet.tsx";
 
-export function AgentsPanel() {
+export function AgentsPanel({ onConnect }: { onConnect(agent: AgentView): void }) {
   const { accountId, send } = useWallet();
-  const agents = useAsync(() => (accountId ? registry.agentsOf(accountId) : Promise.resolve([])), [accountId]);
+  const { registry } = useWorkspaceRegistry();
+  const agents = useAsync(() => (accountId ? registry.agentsOf(accountId) : Promise.resolve([])), [accountId, registry]);
   const action = useAction();
 
   if (!accountId) return <p className="muted">Connect a wallet to see your agents.</p>;
@@ -39,7 +41,7 @@ export function AgentsPanel() {
 
   const renderAgent = (agent: AgentView) => (
     <li key={agent.agent_id}>
-      <AgentCard agent={agent} exec={exec} busy={action.busy} />
+      <AgentCard agent={agent} exec={exec} busy={action.busy} onConnect={onConnect} />
       {childrenOf(agent.agent_id).length > 0 && <ul className="tree">{childrenOf(agent.agent_id).map(renderAgent)}</ul>}
     </li>
   );
@@ -61,15 +63,18 @@ function AgentCard({
   agent,
   exec,
   busy,
+  onConnect,
 }: {
   agent: AgentView;
   exec: (label: string, tx: ReturnType<typeof pauseAgent>) => Promise<void>;
   busy: boolean;
+  onConnect(agent: AgentView): void;
 }) {
+  const { registry, mode } = useWorkspaceRegistry();
   const [open, setOpen] = useState<"none" | "child" | "records">("none");
   const removed = agent.status.state === "removed";
   const paused = agent.status.state === "paused";
-  const reg = config.registryId;
+  const reg = registry.registryId;
 
   return (
     <div className={`card agent ${removed ? "removed" : ""}`}>
@@ -83,9 +88,9 @@ function AgentCard({
       <dl className="facts">
         <dt>Executor</dt>
         <dd>
-          <a href={explorerAccount(agent.executor)} target="_blank" rel="noreferrer">
+          {agent.executor ? <a href={explorerAccount(agent.executor)} target="_blank" rel="noreferrer">
             {agent.executor}
-          </a>
+          </a> : "Connect an agent to request payments"}
         </dd>
         <dt>Can request</dt>
         <dd>{capText(agent.capabilities)}</dd>
@@ -96,6 +101,7 @@ function AgentCard({
       </dl>
       {!removed && (
         <div className="actions">
+          {mode !== "legacy" && <button type="button" disabled={busy} onClick={() => onConnect(agent)}>Connect</button>}
           {paused ? (
             <button disabled={busy} onClick={() => exec("Resume", resumeAgent(reg, agent.agent_id))}>
               Resume
@@ -165,6 +171,7 @@ function AgentCard({
 const accountSuffix = config.network === "mainnet" ? "near" : "testnet";
 
 function ChildForm({ parent, busy, onSubmit }: { parent: AgentView; busy: boolean; onSubmit: (tx: ReturnType<typeof createChild>) => Promise<void> }) {
+  const { registry } = useWorkspaceRegistry();
   const [label, setLabel] = useState("");
   const executor = useExecutorAccount(parent.holder);
   const [max, setMax] = useState("1");
@@ -185,8 +192,8 @@ function ChildForm({ parent, busy, onSubmit }: { parent: AgentView; busy: boolea
             throw new Error("Choose a payment limit within the parent's limit.");
           }
           if (!await executor.verify()) return;
-          await onSubmit(createChild(config.registryId, parent.agent_id, label.trim(), {
-            executor: executor.value.trim(),
+          await onSubmit(createChild(registry.registryId, parent.agent_id, label.trim(), {
+            executor: executor.value.trim() || null,
             capabilities: transferCapability(amount),
             expiresAt: parent.expires_at,
           }));
@@ -218,6 +225,7 @@ function ChildForm({ parent, busy, onSubmit }: { parent: AgentView; busy: boolea
 }
 
 function Records({ agent, busy, exec }: { agent: AgentView; busy: boolean; exec: (label: string, tx: ReturnType<typeof setRecord>) => Promise<void> }) {
+  const { registry } = useWorkspaceRegistry();
   const records = useAsync(() => registry.getRecords(agent.agent_id), [agent.agent_id, busy]);
   const [key, setKey] = useState("profile.description");
   const [value, setValue] = useState("");
@@ -233,7 +241,7 @@ function Records({ agent, busy, exec }: { agent: AgentView; busy: boolean; exec:
               </td>
               <td>{r.value}</td>
               <td>
-                <button disabled={busy} onClick={() => exec("Remove record", removeRecord(config.registryId, agent.agent_id, r.key))}>
+                <button disabled={busy} onClick={() => exec("Remove record", removeRecord(registry.registryId, agent.agent_id, r.key))}>
                   Remove
                 </button>
               </td>
@@ -244,7 +252,7 @@ function Records({ agent, busy, exec }: { agent: AgentView; busy: boolean; exec:
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          exec("Set record", setRecord(config.registryId, agent.agent_id, key.trim(), value));
+          exec("Set record", setRecord(registry.registryId, agent.agent_id, key.trim(), value));
         }}
       >
         <input value={key} onChange={(e) => setKey(e.target.value)} placeholder="namespace.name" required />
@@ -292,6 +300,7 @@ function FieldLabel({ id, titleId, label, help }: { id?: string; titleId?: strin
 type ExecutorStatus = { kind: "checking" | "ok" | "error"; text: string };
 
 function useExecutorAccount(owner: string | null) {
+  const { registry, mode } = useWorkspaceRegistry();
   const [value, setValue] = useState("");
   const [status, setStatus] = useState<ExecutorStatus | null>(null);
   const pending = useRef<Promise<boolean> | null>(null);
@@ -304,7 +313,8 @@ function useExecutorAccount(owner: string | null) {
 
   async function verify() {
     const id = value.trim();
-    const message = id === owner || id === config.registryId
+    if (!id && mode === "per-user") return true;
+    const message = id === owner || id === registry.registryId
       ? "Enter a separate NEAR account for the agent runner."
       : id.length < 2 || id.length > 64 || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*$/.test(id)
         ? "Enter a valid NEAR account ID."
@@ -336,10 +346,11 @@ function useExecutorAccount(owner: string | null) {
 }
 
 function ExecutorField({ executor, example }: { executor: ReturnType<typeof useExecutorAccount>; example: string }) {
+  const { mode } = useWorkspaceRegistry();
   const id = useId();
   return (
     <div className="agent-field executor-field">
-      <FieldLabel id={id} label="Executor account" help="The separate NEAR account your runner uses to submit agent requests. Enter its public account ID. The runner needs a function-call key limited to the registry's execute method." />
+      <FieldLabel id={id} label={mode === "per-user" ? "Executor account (optional)" : "Executor account"} help="Enter a separate NEAR account if you use the script runner. For a connected agent, leave this empty." />
       <input
         id={id}
         value={executor.value}
@@ -348,12 +359,12 @@ function ExecutorField({ executor, example }: { executor: ReturnType<typeof useE
         placeholder={example}
         autoCapitalize="none"
         spellCheck={false}
-        required
+        required={mode !== "per-user"}
         aria-describedby={`${id}-status`}
         aria-invalid={executor.status?.kind === "error" || undefined}
       />
       <div className={`field-status ${executor.status?.kind ?? ""}`} id={`${id}-status`} role="status">
-        {executor.status?.text ?? `Use an existing ${networkName} account.`}
+        {executor.status?.text ?? (mode === "per-user" ? "Leave blank to connect a restricted agent key later." : `Use an existing ${networkName} account.`)}
         {executor.status?.kind === "ok" && (
           <a href={explorerAccount(executor.value.trim())} target="_blank" rel="noreferrer" aria-label="View executor account on NearBlocks (opens in a new tab)">
             NearBlocks <ExternalLink size={12} aria-hidden="true" />
@@ -384,6 +395,7 @@ const minutes = Array.from({ length: 60 }, (_, n) => String(n).padStart(2, "0"))
 
 function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: ReturnType<typeof registerAgent>) => Promise<void> }) {
   const { accountId } = useWallet();
+  const { registry, mode } = useWorkspaceRegistry();
   const [handle, setHandle] = useState("");
   const executor = useExecutorAccount(accountId);
   const [max, setMax] = useState("3");
@@ -391,7 +403,7 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
   const [hour, setHour] = useState("00");
   const [minute, setMinute] = useState("00");
   const [description, setDescription] = useState("");
-  const [noTransfer, setNoTransfer] = useState(false);
+  const [noTransfer, setNoTransfer] = useState(mode === "per-user");
   const [freeze, setFreeze] = useState(false);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -416,8 +428,8 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
       if (new TextEncoder().encode(description).length > 512) throw new Error("Keep the description within 512 bytes.");
       if (!await executor.verify()) return;
       const expires = localExpiry(date, hour, minute);
-      await onSubmit(registerAgent(config.registryId, handle.trim(), {
-        executor: executor.value.trim(),
+      await onSubmit(registerAgent(registry.registryId, handle.trim(), {
+        executor: executor.value.trim() || null,
         capabilities: transferCapability(amount),
         expiresAt: expires ? BigInt(expires.getTime()) * 1_000_000n : null,
         locks: (noTransfer ? LOCKS.NO_TRANSFER : 0) | (freeze ? LOCKS.NO_CAPABILITY_RAISE : 0),

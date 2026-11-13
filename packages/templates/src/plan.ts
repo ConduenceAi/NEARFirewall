@@ -21,7 +21,7 @@ export type PlanStep =
   | {
       kind: "register_agent";
       handle: string;
-      executor: string;
+      executor: string | null;
       capabilities: Capabilities;
       expiresAt?: bigint | null;
       locks?: number;
@@ -31,7 +31,7 @@ export type PlanStep =
       kind: "create_child";
       parentHandle: string;
       label: string;
-      executor: string;
+      executor: string | null;
       capabilities: Capabilities;
       expiresAt?: bigint | null;
       locks?: number;
@@ -44,6 +44,7 @@ export type PlanStep =
       expiresAt?: bigint | null;
       fixed?: boolean;
       recipients: RecipientRuleInput[];
+      confirmAbove?: bigint | null;
     }
   | { kind: "approve_recipient"; agentHandle: string; rule: RecipientRuleInput }
   | { kind: "set_record"; agentHandle: string; key: string; value: string }

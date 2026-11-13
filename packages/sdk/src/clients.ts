@@ -3,7 +3,9 @@ import type { NearRpc } from "./rpc.ts";
 import { EMPTY_CODE_HASH } from "./rpc.ts";
 import {
   AgentView,
+  Connection,
   Mandate,
+  PendingConfirmation,
   PathNode,
   PaymentRequestRecord,
   PolicyActivity,
@@ -69,6 +71,11 @@ export class RegistryClient {
     return viewParsed(this.rpc, this.registryId, "get_activity", { agent_id: agentId, limit }, z.array(RegistryActivity));
   }
 
+  /** The account that owns this registry (user-owned registries only). */
+  getOwner() {
+    return viewParsed(this.rpc, this.registryId, "get_owner", {}, z.string());
+  }
+
   /** Agent tokens held by an account, as agent views. */
   async agentsOf(accountId: string): Promise<AgentView[]> {
     const tokens = z
@@ -100,6 +107,7 @@ export class PolicyClient {
    */
   async state(expectedCodeHash?: string): Promise<PolicyState> {
     const account = await this.rpc.viewAccount(this.payerId);
+    if (account.globalContractAccountId) return { kind: "other", codeHash: account.globalContractAccountId };
     if (account.codeHash === EMPTY_CODE_HASH) return { kind: "none" };
     if (expectedCodeHash && account.codeHash !== expectedCodeHash) return { kind: "other", codeHash: account.codeHash };
     return { kind: "enabled", codeHash: account.codeHash };
@@ -107,6 +115,20 @@ export class PolicyClient {
 
   getPolicy() {
     return viewParsed(this.rpc, this.payerId, "get_policy", {}, PolicyView);
+  }
+
+  /** Agent keys connected on this account, optionally only those of one agent. */
+  getConnections(agentId?: string) {
+    return viewParsed(this.rpc, this.payerId, "get_connections", { agent_id: agentId ?? null }, z.array(Connection));
+  }
+
+  getConnection(publicKey: string) {
+    return viewParsed(this.rpc, this.payerId, "get_connection", { public_key: publicKey }, Connection.nullable());
+  }
+
+  /** Payments waiting for the owner's confirmation. */
+  getPending() {
+    return viewParsed(this.rpc, this.payerId, "get_pending", {}, z.array(PendingConfirmation));
   }
 
   getRevision() {
@@ -159,4 +181,31 @@ export class PolicyClient {
       Preview,
     );
   }
+}
+
+export type RegistryState =
+  | { kind: "missing" }
+  | { kind: "ready"; codeHash: string }
+  | { kind: "untrusted"; reason: string };
+
+/**
+ * Checks an owner's registry before the app trusts it: the account exists, it
+ * runs the expected code, it has no access keys (so nobody can change the code),
+ * and its owner is the connected account.
+ */
+export async function checkRegistry(rpc: NearRpc, registryId: string, owner: string, expectedCodeHash?: string): Promise<RegistryState> {
+  if (!(await rpc.accountExists(registryId))) return { kind: "missing" };
+  const account = await rpc.viewAccount(registryId);
+  if (account.globalContractAccountId) {
+    return { kind: "untrusted", reason: `${registryId} uses code managed by ${account.globalContractAccountId}.` };
+  }
+  if (account.codeHash === EMPTY_CODE_HASH) return { kind: "untrusted", reason: `${registryId} exists but runs no contract.` };
+  if (expectedCodeHash && account.codeHash !== expectedCodeHash) {
+    return { kind: "untrusted", reason: `${registryId} runs different code (${account.codeHash}).` };
+  }
+  const keys = await rpc.viewAccessKeys(registryId);
+  if (keys.length > 0) return { kind: "untrusted", reason: `${registryId} has access keys, so its code could be changed.` };
+  const registryOwner = await new RegistryClient(rpc, registryId).getOwner().catch(() => null);
+  if (registryOwner !== owner) return { kind: "untrusted", reason: `${registryId} is not owned by ${owner}.` };
+  return { kind: "ready", codeHash: account.codeHash };
 }

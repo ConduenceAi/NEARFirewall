@@ -6,33 +6,40 @@
  * Selecting a node opens the inspector with everything about it.
  */
 import { useEffect, useMemo, useState } from "react";
-import { Bot, CircleSlash, Eye, EyeOff, Lock, PauseCircle, RefreshCw, ShieldCheck, Snowflake, UserRound, Wallet } from "lucide-react";
-import { LOCKS, type AgentView, type Mandate, type PolicyState, type PolicyView, type UsageView } from "@nearfirewall/sdk";
-import { config, policyOf, registry } from "../config.ts";
+import { Bot, CircleSlash, Eye, EyeOff, KeyRound, Lock, PauseCircle, RefreshCw, ShieldCheck, Snowflake, UserRound, Wallet } from "lucide-react";
+import { LOCKS, type AgentView, type Connection, type Mandate, type PolicyState, type PolicyView, type UsageView } from "@nearfirewall/sdk";
+import { policyOf } from "../config.ts";
+import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { near } from "../format.ts";
 import { useAsync } from "../hooks.ts";
 import { useWallet } from "../wallet.tsx";
 import { href } from "../router.ts";
 import { Inspector, type Selection } from "./Inspector.tsx";
+import { useMapGestures } from "./useMapGestures.ts";
 
 export interface MapData {
   account: string;
+  registryId: string;
   state: PolicyState;
   policy: PolicyView | null;
   agents: AgentView[];
   mandates: Map<string, Mandate>;
   usage: Map<string, UsageView>;
+  connections: Connection[];
 }
 
-export async function loadMap(account: string): Promise<MapData> {
+async function loadMap(account: string, { registry, policyCodeHash }: ReturnType<typeof useWorkspaceRegistry>): Promise<MapData> {
   const policy = policyOf(account);
-  const [state, held] = await Promise.all([policy.state(config.policyCodeHash), registry.agentsOf(account)]);
+  const [state, held] = await Promise.all([policy.state(policyCodeHash), registry.agentsOf(account)]);
   const agents = held.filter((a) => a.status.state !== "removed");
   const mandates = new Map<string, Mandate>();
   const usage = new Map<string, UsageView>();
   let view: PolicyView | null = null;
+  let connections: Connection[] = [];
   if (state.kind === "enabled") {
     view = await policy.getPolicy();
+    if (view.registry !== registry.registryId) throw new Error(`Your payment policy trusts ${view.registry}. Select that registry before managing its agents.`);
+    if (view.connections !== undefined) connections = await policy.getConnections();
     await Promise.all(
       agents.map(async (a) => {
         const m = await policy.getMandate(a.agent_id);
@@ -42,27 +49,27 @@ export async function loadMap(account: string): Promise<MapData> {
       }),
     );
   }
-  return { account, state, policy: view, agents, mandates, usage };
+  return { account, registryId: registry.registryId, state, policy: view, agents, mandates, usage, connections };
 }
 
 // ------------------------------------------------------------------ layout
 
 const AGENT_W = 230;
-const AGENT_H = 104;
 const RECIPIENT_W = 180;
-const RECIPIENT_H = 58;
 const ACCOUNT_W = 260;
-const ACCOUNT_H = 92;
+const DETAIL_NODE_H = 112;
+const COMPACT_NODE_H = 72;
 const H_GAP = 26;
 const V_GAP = 64;
 
-type NodeKind = "account" | "agent" | "recipient";
+type NodeKind = "account" | "registry" | "agent" | "connection" | "recipient";
 
 interface LayoutNode {
   key: string;
   kind: NodeKind;
   children: LayoutNode[];
   agent?: AgentView;
+  connection?: Connection;
   recipient?: { owner: AgentView; account: string };
   x: number;
   y: number;
@@ -71,10 +78,10 @@ interface LayoutNode {
 }
 
 function widthOf(kind: NodeKind) {
-  return kind === "account" ? ACCOUNT_W : kind === "agent" ? AGENT_W : RECIPIENT_W;
+  return kind === "account" || kind === "registry" ? ACCOUNT_W : kind === "agent" ? AGENT_W : RECIPIENT_W;
 }
 function heightOf(kind: NodeKind) {
-  return kind === "account" ? ACCOUNT_H : kind === "agent" ? AGENT_H : RECIPIENT_H;
+  return kind === "account" || kind === "agent" ? DETAIL_NODE_H : COMPACT_NODE_H;
 }
 
 function buildTree(data: MapData, showRecipients: boolean): LayoutNode {
@@ -95,6 +102,9 @@ function buildTree(data: MapData, showRecipients: boolean): LayoutNode {
       .filter((a) => a.parent === agent.agent_id)
       .sort((a, b) => Number(a.agent_id) - Number(b.agent_id))
       .map(agentNode);
+    for (const connection of data.connections.filter((c) => c.agent_id === agent.agent_id)) {
+      node.children.push(make("connection", `key:${connection.public_key}`, { connection }));
+    }
     const mandate = data.mandates.get(agent.agent_id);
     if (showRecipients && mandate && mandate.status === "Active") {
       for (const account of Object.keys(mandate.recipients)) {
@@ -104,10 +114,15 @@ function buildTree(data: MapData, showRecipients: boolean): LayoutNode {
     return node;
   };
   const root = make("account", "account");
-  root.children = data.agents
+  const registry = make("registry", "registry");
+  root.children = [registry];
+  registry.children = data.agents
     .filter((a) => !a.parent || !ids.has(a.parent))
     .sort((a, b) => Number(a.agent_id) - Number(b.agent_id))
     .map(agentNode);
+  for (const connection of data.connections.filter((c) => !ids.has(c.agent_id))) {
+    root.children.push(make("connection", `key:${connection.public_key}`, { connection }));
+  }
   return root;
 }
 
@@ -167,7 +182,7 @@ function AgentCard({ agent, data }: { agent: AgentView; data: MapData }) {
         {(agent.locks & LOCKS.NO_CAPABILITY_RAISE) !== 0 && <Snowflake size={13} aria-label="Capabilities frozen" />}
       </span>
       <span className="node-sub">
-        #{agent.agent_id} · {agent.executor}
+        #{agent.agent_id}{agent.executor ? ` · ${agent.executor}` : ""}
       </span>
       <span className="node-chips">
         <span className="chip">{cap === undefined ? "no payments" : `≤ ${near(cap)}`}</span>
@@ -187,17 +202,25 @@ function AgentCard({ agent, data }: { agent: AgentView; data: MapData }) {
   );
 }
 
-export function AgentMap() {
+export function AgentMap({ onConnect, connectionChanges }: { onConnect(agent: AgentView): void; connectionChanges: number }) {
   const { accountId } = useWallet();
-  const map = useAsync(() => (accountId ? loadMap(accountId) : Promise.resolve(null)), [accountId]);
+  const workspace = useWorkspaceRegistry();
+  const map = useAsync(() => (accountId ? loadMap(accountId, workspace) : Promise.resolve(null)), [accountId, connectionChanges, workspace]);
   const [showRecipients, setShowRecipients] = useState(true);
   const [selected, setSelected] = useState<Selection | null>(null);
-
   const data = map.data ?? null;
   const tree = useMemo(() => (data ? layout(buildTree(data, showRecipients)) : null), [data, showRecipients]);
+  const hasCanvas = tree !== null;
+  const { viewportRef, canvasRef } = useMapGestures(hasCanvas);
 
   // Keep the selection pointing at fresh data after a reload.
   useEffect(() => {
+    if (data && selected?.kind === "connection") {
+      const fresh = data.connections.find((c) => c.public_key === selected.connection.public_key);
+      if (!fresh) setSelected(null);
+      else if (fresh !== selected.connection) setSelected({ kind: "connection", connection: fresh });
+      return;
+    }
     if (!data || !selected || selected.kind !== "agent") return;
     const fresh = data.agents.find((a) => a.agent_id === selected.agent.agent_id);
     if (!fresh) setSelected(null);
@@ -208,12 +231,16 @@ export function AgentMap() {
 
   const select = (node: LayoutNode) => {
     if (node.kind === "account") setSelected({ kind: "account" });
+    else if (node.kind === "registry") setSelected({ kind: "registry" });
     else if (node.kind === "agent" && node.agent) setSelected({ kind: "agent", agent: node.agent });
+    else if (node.connection) setSelected({ kind: "connection", connection: node.connection });
     else if (node.recipient) setSelected({ kind: "recipient", owner: node.recipient.owner, account: node.recipient.account });
   };
   const isSelected = (node: LayoutNode) =>
     selected !== null &&
     ((selected.kind === "account" && node.kind === "account") ||
+      (selected.kind === "registry" && node.kind === "registry") ||
+      (selected.kind === "connection" && node.connection?.public_key === selected.connection.public_key) ||
       (selected.kind === "agent" && node.agent?.agent_id === selected.agent.agent_id && node.kind === "agent") ||
       (selected.kind === "recipient" &&
         node.recipient?.account === selected.account &&
@@ -222,13 +249,7 @@ export function AgentMap() {
   return (
     <section aria-labelledby="map-heading" className={selected ? "with-inspector" : undefined}>
       <h1 id="map-heading" className="visually-hidden">Agent map</h1>
-      <div className="toolbar">
-        <p className="hint map-legend">
-          <span><i className="edge-swatch holds" /> holds</span>
-          <span><i className="edge-swatch parent" /> parent of</span>
-          <span><i className="edge-swatch pays" /> may pay</span>
-          Select any node for its rules.
-        </p>
+      <div className="toolbar map-toolbar">
         <div className="actions">
           <button type="button" onClick={() => setShowRecipients((v) => !v)} aria-pressed={showRecipients}>
             {showRecipients ? <EyeOff size={16} /> : <Eye size={16} />} {showRecipients ? "Hide recipients" : "Show recipients"}
@@ -243,69 +264,88 @@ export function AgentMap() {
       {!tree && <p className="empty">{map.loading ? "Loading the map…" : "Nothing to show yet."}</p>}
 
       {tree && data && (
-        <div className="map-scroll">
-          <div className="map-canvas" style={{ width: tree.width, height: tree.height }}>
-            <svg className="map-edges" width={tree.width} height={tree.height} aria-hidden="true">
-              {tree.nodes.flatMap((parent) =>
-                parent.children.map((child) => {
-                  const x1 = parent.x + parent.w / 2;
-                  const y1 = parent.y + parent.h;
-                  const x2 = child.x + child.w / 2;
-                  const y2 = child.y;
-                  const mid = (y1 + y2) / 2;
-                  const kind = parent.kind === "account" ? "holds" : child.kind === "recipient" ? "pays" : "parent";
-                  return <path key={`${parent.key}->${child.key}`} className={`edge ${kind}`} d={`M${x1},${y1} C${x1},${mid} ${x2},${mid} ${x2},${y2}`} />;
-                }),
-              )}
-            </svg>
-            {tree.nodes.map((node) => (
-              <button
-                key={node.key}
-                type="button"
-                className={`map-node ${node.kind}${isSelected(node) ? " selected" : ""}${node.agent?.status.state === "paused" ? " paused" : ""}`}
-                style={{ left: node.x, top: node.y, width: node.w, height: node.h }}
-                onClick={() => select(node)}
-                aria-pressed={isSelected(node)}
-              >
-                {node.kind === "account" && (
-                  <>
-                    <span className="node-title">
-                      <Wallet size={15} aria-hidden="true" />
-                      <strong>{data.account}</strong>
-                    </span>
-                    <span className="node-sub">Your account · payer</span>
-                    <span className="node-chips">
-                      {data.state.kind === "enabled" ? (
-                        data.policy?.paused ? (
-                          <span className="chip warn"><PauseCircle size={12} /> payments paused</span>
+        <div className="map-scroll" ref={viewportRef} role="region" aria-label="Map canvas" aria-describedby="map-zoom-help" tabIndex={0}>
+          <div className="map-stage">
+            <div className="map-canvas" ref={canvasRef} style={{ width: tree.width, height: tree.height }}>
+              <svg className="map-edges" width={tree.width} height={tree.height} aria-hidden="true">
+                {tree.nodes.flatMap((parent) =>
+                  parent.children.map((child) => {
+                    const x1 = parent.x + parent.w / 2;
+                    const y1 = parent.y + parent.h;
+                    const x2 = child.x + child.w / 2;
+                    const y2 = child.y;
+                    const mid = (y1 + y2) / 2;
+                    const kind = child.kind === "connection" ? "connection" : parent.kind === "account" || parent.kind === "registry" ? "holds" : child.kind === "recipient" ? "pays" : "parent";
+                    return <path key={`${parent.key}->${child.key}`} className={`edge ${kind}`} d={`M${x1},${y1} C${x1},${mid} ${x2},${mid} ${x2},${y2}`} />;
+                  }),
+                )}
+              </svg>
+              {tree.nodes.map((node) => (
+                <button
+                  key={node.key}
+                  type="button"
+                  className={`map-node ${node.kind}${isSelected(node) ? " selected" : ""}${node.agent?.status.state === "paused" ? " paused" : ""}`}
+                  style={{ left: node.x, top: node.y, width: node.w, height: node.h }}
+                  onClick={() => select(node)}
+                  aria-pressed={isSelected(node)}
+                >
+                  {node.kind === "account" && (
+                    <>
+                      <span className="node-title">
+                        <Wallet size={15} aria-hidden="true" />
+                        <strong>{data.account}</strong>
+                      </span>
+                      <span className="node-sub">Your account · payer</span>
+                      <span className="node-chips">
+                        {data.state.kind === "enabled" ? (
+                          data.policy?.paused ? (
+                            <span className="chip warn"><PauseCircle size={12} /> payments paused</span>
+                          ) : (
+                            <span className="chip ok"><ShieldCheck size={12} /> policy on</span>
+                          )
+                        ) : data.state.kind === "other" ? (
+                          <span className="chip warn"><CircleSlash size={12} /> other contract</span>
                         ) : (
-                          <span className="chip ok"><ShieldCheck size={12} /> policy on</span>
-                        )
-                      ) : data.state.kind === "other" ? (
-                        <span className="chip warn"><CircleSlash size={12} /> other contract</span>
-                      ) : (
-                        <span className="chip muted">payments not enabled</span>
-                      )}
-                      {data.policy && <span className="chip">{near(data.policy.available_balance)} available</span>}
-                    </span>
-                  </>
-                )}
-                {node.kind === "agent" && node.agent && <AgentCard agent={node.agent} data={data} />}
-                {node.kind === "recipient" && node.recipient && (
-                  <RecipientCard data={data} owner={node.recipient.owner} account={node.recipient.account} />
-                )}
-              </button>
-            ))}
+                          <span className="chip muted">payments not enabled</span>
+                        )}
+                        {data.policy && <span className="chip">{near(data.policy.available_balance)} available</span>}
+                      </span>
+                    </>
+                  )}
+                  {node.kind === "registry" && <>
+                    <span className="node-title"><ShieldCheck size={15} aria-hidden="true" /><strong>{data.registryId}</strong></span>
+                    <span className="node-sub">Agent registry</span>
+                  </>}
+                  {node.kind === "agent" && node.agent && <AgentCard agent={node.agent} data={data} />}
+                  {node.connection && <>
+                    <span className="node-title"><KeyRound size={15} aria-hidden="true" /><strong>{node.connection.label}</strong></span>
+                    <span className="node-sub">Restricted key</span>
+                  </>}
+                  {node.kind === "recipient" && node.recipient && (
+                    <RecipientCard data={data} owner={node.recipient.owner} account={node.recipient.account} />
+                  )}
+                </button>
+              ))}
+            </div>
+            {data.agents.length === 0 && (
+              <p className="empty">
+                No agents yet. <a href={href("/app/agents")}>Register your first agent</a> and it appears here under your account.
+              </p>
+            )}
           </div>
-          {data.agents.length === 0 && (
-            <p className="empty">
-              No agents yet. <a href={href("/app/agents")}>Register your first agent</a> and it appears here under your account.
-            </p>
-          )}
         </div>
       )}
 
-      {selected && data && <Inspector selection={selected} data={data} onClose={() => setSelected(null)} onChanged={map.reload} />}
+      <p className="hint map-legend">
+        <span className="holds"><i className="edge-swatch" aria-hidden="true" /> holds</span>
+        <span className="parent"><i className="edge-swatch" aria-hidden="true" /> parent of</span>
+        <span className="pays"><i className="edge-swatch" aria-hidden="true" /> may pay</span>
+        <span className="connection"><i className="edge-swatch" aria-hidden="true" /> connected key</span>
+        <span>Select any node for its rules.</span>
+        {hasCanvas && <span id="map-zoom-help">Drag to pan. Pinch to zoom. With the map focused, use arrow keys to pan, + or − to zoom, and 0 to reset.</span>}
+      </p>
+
+      {selected && data && <Inspector selection={selected} data={data} onClose={() => setSelected(null)} onChanged={map.reload} onConnect={onConnect} />}
     </section>
   );
 }

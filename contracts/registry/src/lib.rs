@@ -1,5 +1,8 @@
 //! NEARFirewall registry.
 //!
+//! Each user owns their own registry, deployed on a sub-account of their account
+//! (`agents.<you>`), with themselves as `owner`. Only the owner registers agents.
+//!
 //! Every agent is a NEP-171 token. The token holder owns the agent. The
 //! registry stores each agent's executor, capabilities, expiry, locks, place in
 //! the agent tree, and records, and routes typed requests from an agent's
@@ -31,8 +34,8 @@ use near_sdk::{
     PanicOnDefault, Promise, PromiseOrValue,
 };
 use nearfirewall_types::{
-    is_valid_request_id, Action, AgentId, Capabilities, ExecContext, Outcome, PathNode, Reason,
-    MAX_DEPTH,
+    is_valid_request_id, Action, AgentId, Authorization, Capabilities, ExecContext, Outcome,
+    PathNode, Reason, MAX_DEPTH,
 };
 
 /// The token cannot be transferred or approved for transfer.
@@ -89,7 +92,9 @@ pub struct AgentRecord {
     pub parent: Option<AgentId>,
     /// Root first, excluding the agent itself. Fixed at creation.
     pub ancestors: Vec<AgentId>,
-    pub executor: AccountId,
+    /// Account allowed to call `execute` for this agent. `None` for agents that
+    /// act only through connection keys on the owner's account.
+    pub executor: Option<AccountId>,
     pub capabilities: Capabilities,
     pub status: Status,
     pub expires_at: Option<u64>,
@@ -108,7 +113,7 @@ pub struct AgentView {
     pub parent: Option<AgentId>,
     pub ancestors: Vec<AgentId>,
     pub depth: u8,
-    pub executor: AccountId,
+    pub executor: Option<AccountId>,
     pub capabilities: Capabilities,
     pub status: Status,
     pub expires_at: Option<U64>,
@@ -143,14 +148,14 @@ pub enum RegistryEvent {
         agent_id: AgentId,
         handle: String,
         holder: AccountId,
-        executor: AccountId,
+        executor: Option<AccountId>,
         parent: Option<AgentId>,
         generation: u64,
     },
     #[event_version("1.0.0")]
     ExecutorChanged {
         agent_id: AgentId,
-        executor: AccountId,
+        executor: Option<AccountId>,
         generation: u64,
     },
     #[event_version("1.0.0")]
@@ -197,6 +202,8 @@ pub trait PayerPolicy {
 #[near(contract_state)]
 #[derive(PanicOnDefault)]
 pub struct Registry {
+    /// The account that owns this registry and whose payment policy trusts it.
+    owner: AccountId,
     tokens: NonFungibleToken,
     agents: LookupMap<AgentId, AgentRecord>,
     handles: LookupMap<String, AgentId>,
@@ -275,12 +282,23 @@ fn settle_storage(initial: u64, reserved_bytes: u64) {
 
 #[near]
 impl Registry {
+    /// Creates a registry owned by `owner`. Called by the owner in the same
+    /// transaction that creates `agents.<owner>` and deploys this code.
     #[init]
-    pub fn new() -> Self {
+    pub fn new(owner: AccountId) -> Self {
+        require!(
+            env::predecessor_account_id() == owner,
+            "Only the owner can initialize their registry"
+        );
+        require!(
+            owner != env::current_account_id(),
+            "The registry cannot own itself"
+        );
         Self {
+            owner: owner.clone(),
             tokens: NonFungibleToken::new(
                 StorageKey::Owners,
-                env::current_account_id(),
+                owner,
                 Some(StorageKey::TokenMetadata),
                 Some(StorageKey::Enumeration),
                 Some(StorageKey::Approvals),
@@ -298,12 +316,12 @@ impl Registry {
 
     // ------------------------------------------------------------ agents and tree
 
-    /// Registers a top-level agent and mints its token to the caller.
+    /// Registers a top-level agent and mints its token to the owner. Owner only.
     #[payable]
     pub fn register_agent(
         &mut self,
         handle: String,
-        executor: AccountId,
+        executor: Option<AccountId>,
         capabilities: Capabilities,
         expires_at: Option<u64>,
         locks: Option<u32>,
@@ -312,6 +330,10 @@ impl Registry {
         let initial = env::storage_usage();
         validate_label(&handle);
         let holder = env::predecessor_account_id();
+        require!(
+            holder == self.owner,
+            "Only the registry's owner can register agents"
+        );
         let id = self.mint(
             handle,
             holder,
@@ -334,7 +356,7 @@ impl Registry {
         &mut self,
         parent_id: AgentId,
         label: String,
-        executor: AccountId,
+        executor: Option<AccountId>,
         capabilities: Capabilities,
         expires_at: Option<u64>,
         locks: Option<u32>,
@@ -387,12 +409,14 @@ impl Registry {
 
     /// Changes the executor. Advances the generation.
     #[payable]
-    pub fn set_executor(&mut self, agent_id: AgentId, executor: AccountId) {
+    pub fn set_executor(&mut self, agent_id: AgentId, executor: Option<AccountId>) {
         assert_one_yocto();
         let record = self.agent(&agent_id).clone();
         self.require_authority(&agent_id, &record);
         self.require_not_removed(&record);
-        self.validate_executor(&executor, &env::predecessor_account_id());
+        if let Some(executor) = &executor {
+            self.validate_executor(executor, &env::predecessor_account_id());
+        }
         let generation = self.take_generation();
         let record = self.agent_mut(&agent_id);
         record.executor = executor.clone();
@@ -593,7 +617,8 @@ impl Registry {
             return PromiseOrValue::Value(Outcome::denied(Reason::AgentNotFound));
         };
         // Callers other than the executor learn nothing and write nothing.
-        if leaf.executor != env::predecessor_account_id() {
+        let caller = env::predecessor_account_id();
+        if leaf.executor.as_ref() != Some(&caller) {
             return PromiseOrValue::Value(Outcome::denied(Reason::ExecutorMismatch));
         }
         let check = if !is_valid_request_id(&request_id) {
@@ -638,7 +663,7 @@ impl Registry {
                 .emit();
                 let ctx = ExecContext {
                     path,
-                    executor: leaf.executor,
+                    executor: caller,
                     action,
                     request_id,
                     expected_revision,
@@ -651,7 +676,76 @@ impl Registry {
         }
     }
 
+    /// Called by the owner's payment policy when a connection key on the owner's
+    /// account asks to pay. Runs the same checks as `execute` for the owner as
+    /// payer and returns the agent's path, or why it is refused. Any other caller
+    /// is refused and nothing is written.
+    pub fn authorize(
+        &mut self,
+        agent_id: AgentId,
+        action: Action,
+        request_id: String,
+    ) -> Authorization {
+        if env::predecessor_account_id() != self.owner {
+            return Authorization::Denied {
+                reason: Reason::UntrustedCaller,
+                detail: None,
+            };
+        }
+        let Some(leaf) = self.agents.get(&agent_id).cloned() else {
+            return Authorization::Denied {
+                reason: Reason::AgentNotFound,
+                detail: None,
+            };
+        };
+        let payer = self.owner.clone();
+        let check = if is_valid_request_id(&request_id) {
+            self.check_path(&agent_id, &leaf, &payer, &action)
+        } else {
+            Err(Outcome::denied(Reason::InvalidRequest))
+        };
+        match check {
+            Ok(path) => {
+                self.record_activity(&agent_id, &payer, &request_id, &action, "routed", None);
+                RegistryEvent::ExecutionRouted {
+                    agent_id,
+                    payer,
+                    request_id,
+                }
+                .emit();
+                Authorization::Allowed { path }
+            }
+            Err(outcome) => {
+                let (reason, detail) = match outcome {
+                    Outcome::Denied { reason, detail } => (reason, detail),
+                    _ => (Reason::InvalidRequest, None),
+                };
+                self.record_activity(
+                    &agent_id,
+                    &payer,
+                    &request_id,
+                    &action,
+                    "denied",
+                    Some(reason),
+                );
+                RegistryEvent::ExecutionDenied {
+                    agent_id,
+                    payer,
+                    request_id,
+                    reason,
+                }
+                .emit();
+                Authorization::Denied { reason, detail }
+            }
+        }
+    }
+
     // ------------------------------------------------------------ views
+
+    /// The account that owns this registry.
+    pub fn get_owner(&self) -> AccountId {
+        self.owner.clone()
+    }
 
     pub fn get_agent(&self, agent_id: AgentId) -> Option<AgentView> {
         self.agents
@@ -817,7 +911,7 @@ impl Registry {
         holder: AccountId,
         parent: Option<AgentId>,
         ancestors: Vec<AgentId>,
-        executor: AccountId,
+        executor: Option<AccountId>,
         capabilities: Capabilities,
         expires_at: Option<u64>,
         locks: Option<u32>,
@@ -835,11 +929,13 @@ impl Registry {
                 .unwrap_or(true),
             "The description can be at most 512 bytes"
         );
-        self.validate_executor(&executor, &holder);
-        require!(
-            executor != env::predecessor_account_id(),
-            "The executor must be a separate account from the caller"
-        );
+        if let Some(executor) = &executor {
+            self.validate_executor(executor, &holder);
+            require!(
+                executor != &env::predecessor_account_id(),
+                "The executor must be a separate account from the caller"
+            );
+        }
 
         let id = self.next_id.to_string();
         self.next_id += 1;
@@ -1035,7 +1131,7 @@ impl Registry {
         );
         require!(record.status != Status::Removed, "The agent was removed");
         require!(
-            receiver_id != &record.executor,
+            record.executor.as_ref() != Some(receiver_id),
             "An agent cannot be transferred to its own executor"
         );
     }
@@ -1131,7 +1227,7 @@ impl NonFungibleTokenApproval for Registry {
             "This agent is non-transferable"
         );
         require!(
-            account_id != record.executor,
+            record.executor.as_ref() != Some(&account_id),
             "An agent's executor cannot be approved for transfer"
         );
         self.tokens.nft_approve(token_id, account_id, msg)

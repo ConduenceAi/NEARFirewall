@@ -1,0 +1,14 @@
+{
+  "name": "@nearfirewall/mcp",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Local MCP server that lets an AI agent pay within its owner's on-chain rules",
+  "bin": { "nearfirewall-mcp": "./src/main.ts" },
+  "exports": { ".": "./src/server.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@nearfirewall/sdk": "0.1.0",
+    "near-api-js": "^7.5.3",
+    "zod": "^4.6.7"
+  }
+}

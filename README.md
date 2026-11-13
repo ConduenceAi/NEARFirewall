@@ -4,6 +4,26 @@ NEARFirewall registers agents and lets a user authorize them to pay from the use
 
 **Status:** Live on NEAR Testnet. The registry and a demo payer are deployed (see [`deployments/testnet.json`](deployments/testnet.json)), and scripted agents have made and been refused real payments there. To run it, see the [Testnet runbook](docs/testnet-runbook.md).
 
+## Owner registry and connected agents
+
+For a fresh setup, use a named Testnet account. The dashboard creates `agents.<your-account>`, installs the policy on your account, and mints agents in your registry. Register an agent with an optional executor, then approve recipients under **Payments**. Use **Connect** in Agents or the agent map to add a key for a local MCP client. The browser generates the key and shows it once with setup instructions. **Disconnect key** on the map revokes it.
+
+```text
+restricted key -- agent_execute --> policy on your account
+                                        |      ^
+                               authorize|      | agent path + generations
+                                        v      |
+                                   agents.<your-account>
+
+policy checks limits --> transfer NEAR to an approved recipient
+                     --> reserve and wait for owner confirmation if required
+                     --> decline an invalid request with a reason
+```
+
+NEAR limits the connection key to `agent_execute` on your account, zero attached deposit, and a gas allowance. The policy identifies the agent by the signing public key. An **Ask me first** threshold makes otherwise valid payments wait. Confirming rechecks the payment before dispatch, and declining releases the reservation.
+
+For local development, run `npm ci` and `npm run contracts:build`, then copy both contract files to `apps/web/public/` before starting `npm run web:dev`. The build writes `nearfirewall_registry.wasm` and `nearfirewall_account_policy.wasm` under their respective `target/near/` directories. Leave `VITE_REGISTRY_ID` empty for the owner-registry flow. A configured shared registry supports the separate-executor demo below.
+
 ## Hackathon MVP
 
 1. **Connect Meteor.** Alice opens the NEARFirewall web app and connects her NEAR Testnet account through NEAR Connect. Her account ID identifies her in the app. [Meteor Wallet SDK](https://github.com/Meteor-Wallet/meteor_wallet_sdk) · [NEAR Connect](https://github.com/fastnear/near-connect)
@@ -145,7 +165,7 @@ Local recipient removal, mandate revocation, and pause take effect for requests 
 | Account policy, execution | `on_execute` from the trusted registry, private `on_settle`, and read-only `preview`, `get_mandate`, `get_usage`, `get_request` |
 | TypeScript SDK and CLI | Resolve agents, prepare unsigned owner transactions for wallet signing, preview an action, submit as the registered executor, and read execution outcomes. |
 | Templates | `@nearfirewall/templates`: built-in and custom templates with `build(input, { now })`, plus `validate(plan)`. |
-| MCP | Read agent policy and execution state, preview payment requests, and prepare an unsigned recipient approval for owner review. Tool inputs never carry keys. Every call rereads the current policy. An optional per-process payment ceiling is set when the server starts. |
+| Local MCP | `get_rules`, `preview_payment`, `pay`, `check_payment`, and `list_activity`. The local process receives a restricted connection key in its environment. An optional process-level ceiling can further limit payments. |
 
 ### Templates and validation
 

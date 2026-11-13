@@ -1,9 +1,8 @@
 /**
  * Wallet connection through NEAR Connect (Meteor and other NEAR wallets).
  *
- * Every owner write built by the SDK attaches 1 yoctoNEAR, so the wallet always
- * asks the owner to confirm it. This app never adds a function-call key to the
- * owner's account.
+ * Owner actions are signed by the wallet. Connecting an agent adds a separate
+ * function-call key with a gas allowance and permission to call agent_execute.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NearConnector } from "@fastnear/near-connect";
@@ -98,14 +97,16 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const send = useCallback(async (tx: WalletTransaction) => {
+    if (!accountId) throw new Error("Connect your wallet before signing.");
     const wallet = await connector.wallet();
     const outcome = await wallet.signAndSendTransaction({
+      signerId: accountId,
       network: config.network,
       receiverId: tx.receiverId,
       actions: tx.actions,
     });
     return decodeOutcome(outcome);
-  }, []);
+  }, [accountId]);
 
   const value = useMemo(() => ({ accountId, connecting, connect, disconnect, send }), [accountId, connecting, connect, disconnect, send]);
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

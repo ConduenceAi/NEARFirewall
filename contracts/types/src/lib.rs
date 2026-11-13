@@ -134,6 +134,24 @@ pub enum Outcome {
         reason: Reason,
         detail: Option<String>,
     },
+    /// The amount is reserved and waits for the owner to confirm or decline it
+    /// ("ask me first"). Nothing has moved yet.
+    AwaitingConfirmation { request_id: String, expires_at: u64 },
+}
+
+/// The registry's answer when the owner's policy asks it to authorize an agent
+/// (connection mode). `Allowed` carries the agent's path with generations.
+#[near(serializers = [borsh, json])]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Authorization {
+    Allowed {
+        path: Vec<PathNode>,
+    },
+    Denied {
+        reason: Reason,
+        detail: Option<String>,
+    },
 }
 
 impl Outcome {
@@ -186,6 +204,12 @@ pub enum Reason {
     MandateDailyCap,
     AccountDailyCap,
     InsufficientBalance,
+    // Connections and confirmations. Appended: never reorder, the enum is stored in Borsh.
+    UnknownConnection,
+    AuthorizationFailed,
+    ConfirmationDeclined,
+    ConfirmationExpired,
+    TooManyPending,
 }
 
 impl Reason {
@@ -219,6 +243,11 @@ impl Reason {
             Reason::MandateDailyCap => "MANDATE_DAILY_CAP",
             Reason::AccountDailyCap => "ACCOUNT_DAILY_CAP",
             Reason::InsufficientBalance => "INSUFFICIENT_BALANCE",
+            Reason::UnknownConnection => "UNKNOWN_CONNECTION",
+            Reason::AuthorizationFailed => "AUTHORIZATION_FAILED",
+            Reason::ConfirmationDeclined => "CONFIRMATION_DECLINED",
+            Reason::ConfirmationExpired => "CONFIRMATION_EXPIRED",
+            Reason::TooManyPending => "TOO_MANY_PENDING",
         }
     }
 }
@@ -275,10 +304,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(action.amount(), 5);
+        let waiting = Outcome::AwaitingConfirmation {
+            request_id: "ab".into(),
+            expires_at: 5,
+        };
+        assert_eq!(
+            near_sdk::serde_json::to_string(&waiting).unwrap(),
+            r#"{"status":"awaiting_confirmation","request_id":"ab","expires_at":5}"#
+        );
+        let allowed = Authorization::Allowed {
+            path: vec![PathNode {
+                agent_id: "1".into(),
+                generation: 2,
+            }],
+        };
+        assert_eq!(
+            near_sdk::serde_json::to_string(&allowed).unwrap(),
+            r#"{"status":"allowed","path":[{"agent_id":"1","generation":2}]}"#
+        );
         for reason in [
             Reason::BranchPaused,
             Reason::MandateDailyCap,
             Reason::InsufficientBalance,
+            Reason::UnknownConnection,
+            Reason::TooManyPending,
         ] {
             let json = near_sdk::serde_json::to_string(&reason).unwrap();
             assert_eq!(json, format!("\"{}\"", reason.code()));
