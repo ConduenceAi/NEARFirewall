@@ -13,6 +13,9 @@ interface Section {
 const TOC: Section[] = [
   { id: "overview", title: "Overview" },
   { id: "concepts", title: "Key ideas" },
+  { id: "nfts", title: "Agents as NFTs" },
+  { id: "nft-basics", title: "Basics", sub: true },
+  { id: "nft-technology", title: "Underlying technology", sub: true },
   { id: "getting-started", title: "Getting started" },
   { id: "connect", title: "1. Connect a wallet", sub: true },
   { id: "register", title: "2. Register an agent", sub: true },
@@ -165,6 +168,144 @@ export function Docs({ section }: { section?: string }) {
             <p>
               A payment must satisfy <em>every</em> layer: the agent's capability, your approval, the recipient's limits, the agent's daily
               budget, the optional account cap, and your available balance. The tightest rule wins.
+            </p>
+          </Callout>
+
+          <h2 id="nfts">Agents as NFTs</h2>
+          <p>
+            Every agent is a non-fungible token. The token is the agent's identity and proof of who owns it. It is deliberately not a
+            key to anyone's money: spending power always comes from approvals that the paying account gives, and those approvals stop
+            working the moment the token changes hands.
+          </p>
+
+          <h3 id="nft-basics">Basics</h3>
+          <ul>
+            <li>
+              <strong>Registering an agent mints an NFT to your wallet.</strong> It appears in wallets and explorers in the collection
+              "NEARFirewall Agents" (symbol <code>AGENT</code>), named after the agent's handle.
+            </li>
+            <li>
+              <strong>Holding the NFT means you control the agent.</strong> You can pause it, change its executor, add leaf agents under it,
+              burn locks, write its records, transfer it, or remove it.
+            </li>
+            <li>
+              <strong>The NFT does not hold or move money.</strong> An agent can pay only from the account that holds it, and only within
+              the approvals that account has set.
+            </li>
+            <li>
+              <strong>Leaf agents are NFTs too.</strong> Each one is its own token, named under its parent (<code>bot-1.desk</code>), and it can
+              only narrow its parent's rules. Holding a parent also lets you manage everything below it.
+            </li>
+            <li>
+              <strong>Transferring is a clean handover.</strong> The new holder gets control of the agent but no spending power. Every
+              approval for it stops working, and it can no longer charge your account. To make an agent permanently non-transferable, burn
+              the transfer lock.
+            </li>
+            <li>
+              <strong>Removing an agent burns its NFT.</strong> Agents below it stop working, and its handle and ID are never reused.
+            </li>
+          </ul>
+          <Callout kind="tip">
+            <p>
+              Think of the NFT as the agent's ID card: it says who the agent is and who is responsible for it. The approvals on your account
+              are its spending permit. A new owner gets the card but never the permit.
+            </p>
+          </Callout>
+
+          <h3 id="nft-technology">Underlying technology</h3>
+          <p>
+            The registry contract is the NFT contract. It implements the NEAR NFT standard: core (NEP-171), metadata (NEP-177), approvals
+            (NEP-178), and enumeration (NEP-181). Any wallet, explorer, or contract that understands NEAR NFTs can read agents.
+          </p>
+          <table>
+            <thead>
+              <tr>
+                <th>Part</th>
+                <th>How it works</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Token ID</td>
+                <td>The agent ID: a sequential number that is never reused, even after removal. A new agent can never match an old approval.</td>
+              </tr>
+              <tr>
+                <td>Token metadata</td>
+                <td>The title is the handle, there is a single copy, and the token records when it was issued and when it expires.</td>
+              </tr>
+              <tr>
+                <td>Agent record</td>
+                <td>
+                  Stored next to each token: handle, parent and ancestor list, executor, capabilities, status, expiry, locks, and generation.
+                  Read it with <code>get_agent</code>, or by handle with <code>resolve</code>.
+                </td>
+              </tr>
+              <tr>
+                <td>Generation</td>
+                <td>
+                  A number from one registry-wide counter. It changes on every transfer and every executor change. An approval records the
+                  generation of the agent and of each agent above it, and the payer's policy refuses a request whose path no longer matches
+                  (<code>MANDATE_STALE</code>).
+                </td>
+              </tr>
+              <tr>
+                <td>Who can be charged</td>
+                <td>
+                  The registry routes a payment only when the paying account holds the requesting token itself; holding a parent is not
+                  enough (<code>PAYER_NOT_AUTHORIZED</code>). A leaf transferred to someone else can never spend from your branch budget.
+                </td>
+              </tr>
+              <tr>
+                <td>Transfers</td>
+                <td>
+                  <code>nft_transfer</code> needs 1 yoctoNEAR, so only the holder's full-access key can send it, never an agent's restricted
+                  key. Transfers are refused when the transfer lock is burned, or when the receiver is the agent's own executor. Token
+                  approvals are cleared on every transfer.
+                </td>
+              </tr>
+              <tr>
+                <td>Agent tree</td>
+                <td>
+                  <code>create_child</code> mints a child to the parent's holder. Ancestry is fixed at creation, up to 8 levels. On every
+                  payment the registry checks status, expiry, and capability for every agent on the path, all inside one contract.
+                </td>
+              </tr>
+              <tr>
+                <td>Locks</td>
+                <td>
+                  One-way flags on the token: <code>NO_TRANSFER</code> and <code>NO_CAPABILITY_RAISE</code>. They can never be cleared, so
+                  payers and other apps can rely on them.
+                </td>
+              </tr>
+              <tr>
+                <td>Records</td>
+                <td>
+                  Namespaced key/value data on the token, such as <code>profile.description</code>, written by the holder. Records are public
+                  and never grant authority.
+                </td>
+              </tr>
+              <tr>
+                <td>Removal</td>
+                <td>
+                  <code>remove_agent</code> burns the token and emits the standard burn event. The record stays as a tombstone, so the handle
+                  and ID stay reserved, and descendants fail their path check.
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p>Useful read calls on the registry:</p>
+          <pre>
+            <code>{`nft_tokens_for_owner({ account_id })   // every agent you hold
+nft_token({ token_id })               // the standard NFT view
+get_agent({ agent_id })               // the full agent record
+get_path({ agent_id })                // root-to-leaf path with generations
+resolve({ handle })                   // look an agent up by handle
+get_records({ agent_id })             // its public records`}</code>
+          </pre>
+          <Callout kind="note">
+            <p>
+              Everything on a blockchain is public, including the registry, every token, and every record. Store a hash or an encrypted
+              pointer for anything private.
             </p>
           </Callout>
 

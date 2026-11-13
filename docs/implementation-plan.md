@@ -35,6 +35,200 @@ Phase 0 ──┬── Phase 1 ──┬── Phase 3 ──┐
                         └── Phase 7 ──┘
 ```
 
+## Revision 2 (2026-11-13): user-owned registries and agent connections
+
+The first release proved the on-chain model on Testnet with a script acting as the agent. Revision 2 makes it usable with real AI agents:
+
+- **Each user owns their registry.** There is no common registry. A user's agents are NFTs in their own registry, on a sub-account of their own account (`agents.<you>`). The tree, locks, records, and generations stay exactly as they are.
+- **Agents connect from any platform with a restricted key on the owner's account.** In the app, "Connect" on an agent opens the right-hand panel and lists agent platforms. The owner picks one, approves one Meteor transaction, and gets a key that can only call `agent_execute` on their own account, plus setup steps for that platform.
+- **The policy names the agent, the connection, and the rule behind every decision.**
+
+What stays: the contracts' checks, reason codes, branch budgets, the agent map, the activity log, and the separate-executor-account mode (kept for agents that must never touch the owner's account).
+
+### Revision 2 phases
+
+| Phase | Goal | Depends on | Demo v2 | Status |
+| --- | --- | --- | --- | --- |
+| R1 | User-owned registry on `agents.<you>` and shared code published as global contracts | Phase 8 | Required | Not started |
+| R2 | Connections: agent keys on the owner account and `agent_execute` | R1 | Required | Not started |
+| R3 | Connect panel in the app: platform tiles, search, key creation, setup steps, connections on the map | R2 | Required | Not started |
+| R4 | Local MCP server `@nearfirewall/mcp` | R2 | Required | Not started |
+| R5 | "Ask me first" approvals (pending requests approved in the wallet) | R2 | Required | Not started |
+| R6 | Gateway for cloud platforms (remote MCP and HTTP) | R4 | Optional (second platform) | Not started |
+| R7 | Account blocklist, guardian role, and `access.*` browsing rules | R2, R4 | Optional | Not started |
+| R8 | Testnet redeploy, docs, and demo v2 recording | R1–R5 | Required | Not started |
+
+Old phases absorbed: phase 9's MCP part moves to R4 and R6, phase 10's human approval moves to R5, and phase 12's integrations work starts in R6–R7. Typed trade actions remain in phase 12. Until they exist, connected agents can make payments only.
+
+### R1: user-owned registry
+
+**Contract (`contracts/registry`):**
+1. **Owner.** `new(owner)` stores the owner. `register_agent` is owner-only. `create_child` keeps its current authority rule (holder of the parent or an ancestor), so only the owner's tree grows. Every other method is unchanged.
+2. **Authorize.** Add `authorize(agent_id, action) -> Result<Vec<PathNode>, Outcome>`, callable only by the owner's account (the payer). It runs the existing `check_path` (status, expiry, capability along the path, payer holds the agent) and returns the path with generations, or a denial. R2 uses it.
+3. **Unchanged:** the NFT standard, transfers, generations, locks, records, and the tree.
+
+**Deployment, one owner transaction to `agents.<you>`:**
+- `CreateAccount`
+- `Transfer` (storage: about 0.3 NEAR with a global contract, or about 3.5 NEAR for a direct deploy)
+- `UseGlobalContract { codeHash }` or `DeployContract`
+- `FunctionCall new({ owner })`
+
+No access key is added, so nobody can change the code. Upgrades become an explicit later decision: an owner-gated self-upgrade method.
+
+**Shared code.** The project publishes the registry and policy code once as global contracts (NEP-591), identified by code hash. The manifest records both hashes. Spike S2 (can Meteor sign `UseGlobalContract`?) becomes a blocker for this phase. The fallback is a direct deploy, with the storage cost shown in the app before signing.
+
+**Policy (`contracts/account-policy`).** No change in this phase: `initialize(registry = agents.<you>)` already trusts exactly one registry.
+
+**App:**
+- A new onboarding step, "Create my registry".
+- The registry ID is resolved per user: `agents.<account>`, or the policy's `get_policy().registry`.
+- The map shows account → registry → agents.
+
+**Tests:**
+- Owner-only registration.
+- `authorize` callable only by the owner's account.
+- A sandbox test of the deploy batch.
+- On Testnet, a full run with a fresh account.
+
+### R2: connections (agent keys on the owner account)
+
+**Policy contract.** These methods are new:
+
+| Method | Who | What |
+| --- | --- | --- |
+| `connect_agent_key(agent_id, public_key, platform, label)` | Owner (1 yoctoNEAR) | Records a connection: agent, platform ID, label, created at, last used, use count. At most 10 connections per agent. The app puts the matching `AddKey` action in the same transaction. |
+| `disconnect_agent_key(public_key)` | Owner (1 yoctoNEAR) | Removes the connection. The app puts `DeleteKey` in the same transaction. |
+| `agent_execute(action, request_id, client)` | A connected key | See the flow below. `client` is the name the MCP client reported (a hint only). |
+| `get_connections(agent_id)`, `get_connection(public_key)` | Views | For the app and the map. |
+
+**The `agent_execute` flow:**
+1. **Caller checks.**
+   - The predecessor must be the account itself and the attached deposit must be zero. A connected key is a function-call key, so it cannot attach a deposit; an owner write always does.
+   - `env::signer_account_pk()` must be a registered connection. The connection gives the agent ID.
+   - Anything else is denied with `UNKNOWN_CONNECTION`.
+   - A request relayed as a meta-transaction carries the relayer's key, so it also fails, closed.
+2. **Registry check.** Call `registry.authorize(agent_id, action)`. In the callback:
+   - on a denial, record it and return the outcome;
+   - on success, run the existing `check`, reserve, transfer, and `on_settle` path, using the returned path.
+3. **Attribution.** Activity and events record the agent ID, the connection label and platform, and the reported client.
+
+**The access key** the app adds is a function call with `receiver_id = <you>`, `method_names = ["agent_execute"]`, and a configurable gas allowance (default 0.25 NEAR). It cannot transfer, add keys, deploy, or call any other method or contract.
+
+**New reason codes:**
+- `UNKNOWN_CONNECTION`
+- `RECIPIENT_BLOCKED` (R7)
+- `APPROVAL_REQUIRED` (R5): returned as an outcome, not a denial.
+
+**SDK:**
+- `AgentConnection` (`connectAgent({ account, key })`), with `rules()`, `preview()`, and `pay()`. It signs `agent_execute` with the connection key.
+- Owner builders `connectAgentKey` (`AddKey` plus `FunctionCall`) and `disconnectAgentKey` (`DeleteKey` plus `FunctionCall`).
+
+**Tests:**
+- An unknown key is denied.
+- An owner key without a deposit is treated as a connection lookup and denied.
+- A connected key is attributed to the right agent.
+- A disconnected key is denied.
+- A registry denial is recorded with the connection.
+- Callback failure paths.
+- Gas measured with depth 8.
+
+### R3: Connect panel (web app)
+
+**Entry points.**
+- A **Connect** button on each agent card in Agents.
+- A **Connect** button in the map's details panel for an agent.
+- Onboarding step 5 becomes "Connect your agent" instead of running the script.
+
+**Right-hand panel, step 1: choose a platform.**
+- Header: "Connect `trader` to an agent platform".
+- Three tiles for the featured platforms: Claude, ChatGPT, n8n. The featured set is configurable, and the tiles show recently used platforms first once there are any.
+- A **"+" tile** that opens the search field and the full catalog grouped by type: chat assistants, coding agents, workflow automation, agent frameworks, Web3 agent kits, custom.
+- Search matches name, aliases, and type on the client side; there is no network call.
+
+**Step 2: create the key.**
+- A label, prefilled with "<platform> on <device>" (for example "Claude Desktop on laptop"), and a gas allowance (0.25 NEAR).
+- **Create key.** The browser generates an ed25519 key pair with Web Crypto (or near-api-js `KeyPair.fromRandom`). It is never sent anywhere.
+- Meteor opens with one transaction to the owner's own account: `AddKey` (function call, `agent_execute` only, allowance) plus `connect_agent_key`. The panel explains what Meteor will show, and says to refuse any "Full access" request.
+
+**Step 3: key ready (shown once).**
+- The private key with a copy button, plus `.env` download.
+- Setup steps for the chosen platform only, generated from the catalog template with the account, key, and network filled in.
+- Cloud platforms get a gateway section: deploy link, paste the gateway URL, then a health check that shows "Gateway OK · agent trader".
+- After "I've saved it", the panel discards the key from memory.
+
+**Connections everywhere:**
+- **Map:** key nodes under their agent.
+- **Details panel for a connection:** platform, label, public key, created and last used, reported client, a mismatch warning when the reported client differs from the chosen platform, and recent activity.
+- **Disconnect:** one Meteor signature for `DeleteKey` plus `disconnect_agent_key`.
+
+**Catalog as data** (`apps/web/src/platforms.ts`). Each entry has:
+- an ID, name, aliases, and type;
+- a connection method (`local-mcp`, `remote-mcp`, `http`, or `sdk`);
+- setup step templates with placeholders, a docs URL, a "verified on" date, and an icon.
+
+Entries are verified against each platform's current docs before release. Unverified entries show "Setup steps not yet verified".
+
+**Icons.** Neutral monogram tiles for the hackathon. Official logos only after checking each brand's usage guidelines.
+
+**Tests:**
+- Catalog search.
+- Templates fill correctly and never include the key in a URL meant for a chat.
+- The key is cleared after closing.
+- A Playwright flow against the sandbox, with a mock wallet.
+
+### R4: local MCP server (`packages/mcp`)
+
+- **Transport and config.** Stdio. Config comes from the environment only: `NEARFIREWALL_ACCOUNT`, `NEARFIREWALL_AGENT_KEY`, `NEARFIREWALL_NETWORK`, and optionally `NEARFIREWALL_RPC_URL`.
+- **Tools:**
+  - `get_rules`: approved recipients, limits, today's remaining budget, pause state.
+  - `preview_payment`: whether a payment would be allowed, and why not.
+  - `pay`: signs `agent_execute`.
+  - `list_activity`: this connection's recent outcomes.
+  - `request_approval`: R5.
+- **Safety:**
+  - Tool inputs never accept keys.
+  - Every call reads the current policy.
+  - The client name from the MCP `initialize` handshake is passed as `client`.
+  - An optional process-level `--max-payment` ceiling.
+- **Run.** `npx -y @nearfirewall/mcp` once published. For the demo, `node packages/mcp/src/main.ts` from the repo.
+- **Tests:** tool schemas, refusal paths, a mocked RPC, and manual checks in Claude Desktop and Claude Code.
+
+### R5: "Ask me first" approvals
+
+- **Rules.** Recipient rules and mandates gain an optional `approve_above`. A request above it is reserved and stored as pending, and returns `APPROVAL_REQUIRED` with the request ID.
+- **Owner actions.** `approve(request_id, expected_revision)` and `reject(request_id)` (1 yoctoNEAR). Anyone can call `expire(request_id)` after the deadline (default 24 hours). Pending requests are capped at 20 per account.
+- **App.** A pending badge in the sidebar, and a Pending list showing the agent, connection, and amount. Approve opens Meteor.
+- **MCP.** `pay` reports "waiting for your approval". `request_approval` and `get_request` let the agent check back.
+
+### R6: gateway (`apps/gateway`)
+
+- **API.** Remote MCP over streamable HTTP, plus REST: `GET /api/rules`, `POST /api/preview`, `POST /api/pay`, `GET /health`.
+- **Auth.** A gateway token, in the URL path for connector forms without a secret field, or as a bearer header.
+- **Secrets and limits.** Secrets come from the environment only. Requests are rate-limited. Logs never contain keys or tokens.
+- **One gateway holds one connection key.** The owner deploys it: a Docker image, plus Vercel and Cloudflare templates. The project never hosts users' keys.
+
+### R7: blocklist, guardian, access rules (optional for demo v2)
+
+- **Blocklist.** An account blocklist on the policy, enforced for every agent before approvals, with reason `RECIPIENT_BLOCKED`. The owner adds and removes entries.
+- **Guardian.** A connection flagged as guardian can only call `block_recipient`. It can never unblock, approve, or raise a limit.
+- **Browsing rules.** Records `access.allowed_domains` and `access.blocked_domains` on the agent NFT. The MCP server's and gateway's `fetch` tool refuses a domain before requesting it. Documented as runtime enforcement.
+
+### R8: release
+
+1. Publish the global contracts. Create a fresh demo registry and policy through the app.
+2. Update the manifest, README, Docs page ("Connect an agent"), and runbook.
+3. Rehearse and record demo v2 (`docs/demo.md`).
+
+### Revision 2 risks
+
+| Risk | Plan |
+| --- | --- |
+| Meteor may not sign `UseGlobalContract` or `AddKey` with a function-call permission | Test both first (R1 and R2 spikes). Fallbacks: direct deploy, or the NEAR CLI for key creation, with the app showing the public key to verify. |
+| Users paste the key into a chat | The app never offers a chat-paste option, and every template puts the key in a config file or secret store. Each step warns about it. |
+| A leaked connection key | The damage is limited to the agent's rules and the gas allowance. One-signature disconnect. A mismatch warning on the reported client. |
+| Platform setup screens change | Steps come from the catalog with a "verified on" date; re-verify before each release. |
+| A locked registry account cannot be upgraded | Accepted for the hackathon. Design an owner-gated self-upgrade before mainnet. |
+
 ## Repository layout
 
 ```text
@@ -514,3 +708,36 @@ Denials are returned as `Outcome::Denied` and emitted as events; they do not pan
 | C9 CLI and MCP | 9 |
 | C10 Telegram worker | 12 |
 | C11 demo assets | 8 |
+
+## Appendix: agent platform catalog (R3)
+
+The Connect panel lists these platforms. The connection method decides which setup steps and keys the owner receives. The "Verify" column marks entries whose exact setup screens must be checked against the platform's current docs before release.
+
+| Type | Platform | Method | Where the key goes | Verify |
+| --- | --- | --- | --- | --- |
+| Chat assistants | Claude Desktop | Local MCP | `claude_desktop_config.json` (Settings → Developer → Edit Config) | |
+| | Claude.ai (web) | Remote MCP via gateway | Gateway secrets; connector URL in Settings → Connectors | |
+| | ChatGPT | Remote MCP via gateway | Gateway secrets; connector in Settings → Connectors (developer mode) | Yes |
+| | Microsoft Copilot Studio | Remote MCP via gateway | Gateway secrets; MCP connector | Yes |
+| Coding agents | Claude Code | Local MCP | `claude mcp add … -e KEY=…` | |
+| | Cursor | Local MCP | `mcp.json` | |
+| | Windsurf | Local MCP | MCP config | Yes |
+| | VS Code (Copilot agent mode) | Local MCP | `.vscode/mcp.json`, or user settings | Yes |
+| Workflow automation | n8n | Remote MCP or HTTP via gateway; SDK in a Code node | n8n credentials | |
+| | Gumloop | MCP or HTTP via gateway | Gumloop secrets | Yes |
+| | Zapier | HTTP via gateway (webhooks) | Zapier secrets | Yes |
+| | Make | HTTP via gateway | Make connection | Yes |
+| | Lindy, Relevance AI | HTTP via gateway | Platform secrets | Yes |
+| | Dify, Flowise | MCP or HTTP tool via gateway | Platform credentials | Yes |
+| Agent frameworks | OpenAI Agents SDK | Remote MCP or SDK | App environment | |
+| | LangChain / LangGraph | MCP adapters or SDK | App environment | |
+| | CrewAI | MCP adapter or SDK | App environment | Yes |
+| | Vercel AI SDK, Mastra | MCP client or SDK | App environment | |
+| | Google ADK | MCP toolset or SDK | App environment | Yes |
+| | AutoGen | MCP or SDK | App environment | Yes |
+| Web3 agent kits | NEAR AI agents | SDK or HTTP via gateway | Agent environment | Yes |
+| | ElizaOS | Plugin wrapping the SDK, or HTTP | Agent environment | Yes |
+| | GOAT, Coinbase AgentKit | Action provider wrapping the SDK | Agent environment | Yes |
+| Custom | Any language | HTTP via gateway, or the TypeScript SDK | App secret store | |
+
+Featured tiles: Claude (Desktop, Code, and web behind one tile, with the variant picked next), ChatGPT, and n8n. Everything else is under "+".
