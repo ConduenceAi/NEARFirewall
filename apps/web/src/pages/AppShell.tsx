@@ -1,10 +1,11 @@
 import { useState } from "react";
-import { ArrowRight, Bot, ListFilter, LogOut, Network, PanelLeftClose, PanelLeftOpen, Wallet, WalletCards } from "lucide-react";
+import { ArrowRight, BookOpen, Bot, ListFilter, LogOut, Network, PanelLeftClose, PanelLeftOpen, WalletCards } from "lucide-react";
 import { Brand } from "../components/Brand.tsx";
 import { AgentsPanel } from "../components/AgentsPanel.tsx";
 import { PaymentsPanel } from "../components/PaymentsPanel.tsx";
 import { ActivityPanel } from "../components/ActivityPanel.tsx";
 import { AgentMap } from "../components/AgentMap.tsx";
+import { WalletEntry } from "../components/WalletEntry.tsx";
 import { ThemeToggle } from "../theme.tsx";
 import { useWallet } from "../wallet.tsx";
 import { href } from "../router.ts";
@@ -20,7 +21,7 @@ const OPERATIONS = [
 export type Panel = (typeof OPERATIONS)[number]["id"];
 
 export function AppShell({ panel }: { panel: Panel }) {
-  const { accountId, connect, disconnect } = useWallet();
+  const { accountId, disconnect } = useWallet();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const sidebarAction = sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar";
 
@@ -29,10 +30,6 @@ export function AppShell({ panel }: { panel: Panel }) {
       <header className="app-header">
         <div className="header-inner">
           <Brand />
-          <nav className="site-nav" aria-label="Site">
-            <a href={href("/")}>Overview</a>
-            <a href={href("/docs")}>Docs</a>
-          </nav>
           <div className="top-actions">
             <ThemeToggle />
             {accountId && (
@@ -74,6 +71,10 @@ export function AppShell({ panel }: { panel: Panel }) {
                   <span className="sidebar-label">{label}</span>
                 </a>
               ))}
+              <a className="workspace-docs" href={href("/docs")} aria-label="Docs" title={sidebarCollapsed ? "Docs" : undefined}>
+                <BookOpen size={17} aria-hidden="true" />
+                <span className="sidebar-label">Docs</span>
+              </a>
             </nav>
           </aside>
           <div className={`workspace-panel${panel === "map" ? " wide" : ""}`}>
@@ -91,9 +92,7 @@ export function AppShell({ panel }: { panel: Panel }) {
             <h1>Connect your wallet.</h1>
             <p className="lead">Register agents, set spending limits, and review payments from your existing NEAR account.</p>
             <div className="cta-row">
-              <button className="primary" type="button" onClick={() => void connect()}>
-                <Wallet size={17} /> Connect wallet
-              </button>
+              <WalletEntry placement="gate" />
               <a href={href("/docs/getting-started")} className="text-link">Getting started <ArrowRight size={15} /></a>
             </div>
           </div>

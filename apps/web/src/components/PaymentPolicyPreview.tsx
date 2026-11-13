@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { parseNear } from "@nearfirewall/sdk";
-import { ArrowDownRight, ArrowRight, Bot, Check, CircleSlash, ExternalLink, ReceiptText, ShieldCheck } from "lucide-react";
+import { ArrowDownRight, ArrowRight, Bot, Check, CircleSlash, ExternalLink, Fingerprint, Minus, Pause, Play, ReceiptText, RotateCcw, ShieldCheck } from "lucide-react";
 import { near } from "../format.ts";
 import { href } from "../router.ts";
 
@@ -25,6 +25,18 @@ const SCENARIOS = [
   { label: "Over the cap", recipient: "noa", amount: parseNear("4") },
   { label: "Unapproved recipient", recipient: "dragons", amount: parseNear("2") },
 ] as const;
+
+const STAGES = [
+  { label: "Request", icon: Bot },
+  { label: "Registry", icon: Fingerprint },
+  { label: "Wallet policy", icon: ShieldCheck },
+  { label: "Activity", icon: ReceiptText },
+] as const;
+
+const AGENT_PAYMENT_CAP = parseNear("5");
+const RECIPIENT_USED = parseNear("1");
+const AGENT_USED = parseNear("3");
+const AVAILABLE_BALANCE = parseNear("20");
 
 export function PaymentPolicyPreview() {
   return (
@@ -67,54 +79,132 @@ export function PaymentPolicyPreview() {
 
 export function PaymentWalkthrough() {
   const [scenario, setScenario] = useState<(typeof SCENARIOS)[number]>(SCENARIOS[0]);
+  const [step, setStep] = useState(0);
+  const [visible, setVisible] = useState(false);
+  const [playing, setPlaying] = useState(true);
+  const [pageVisible, setPageVisible] = useState(!document.hidden);
+  const sectionRef = useRef<HTMLElement>(null);
   const market = MARKETS[scenario.recipient];
   const { limits } = market;
-  const blockedReason = !limits
-    ? "The owner has not approved this recipient."
-    : scenario.amount > limits.perPayment
-      ? `The request exceeds this recipient’s ${near(limits.perPayment)} per-payment cap.`
-      : null;
+  const amount = near(scenario.amount);
+  const fitsPaymentCap = Boolean(limits && scenario.amount <= limits.perPayment);
+  const blockedReason = !limits ? "Recipient not approved" : !fitsPaymentCap ? "Per-payment cap exceeded" : null;
+  const finalStep = STAGES.length - 1;
+  const titles = ["Agent submits a request", "Registry verifies the agent", "Wallet policy checks spending rules", blockedReason ? "Payment blocked" : "Payment settled"];
+
+  useEffect(() => {
+    const section = sectionRef.current;
+    if (!section) return;
+    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), { threshold: 0.2 });
+    observer.observe(section);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const update = () => setPageVisible(!document.hidden);
+    document.addEventListener("visibilitychange", update);
+    return () => document.removeEventListener("visibilitychange", update);
+  }, []);
+
+  useEffect(() => {
+    if (!visible || !pageVisible || !playing || step === finalStep) return;
+    const timer = window.setTimeout(() => setStep((current) => current + 1), step === 2 ? 9000 : 6000);
+    return () => window.clearTimeout(timer);
+  }, [visible, pageVisible, playing, step, scenario, finalStep]);
+
+  const rule = (label: string, detail: string, result: "pass" | "block" | "skip") => {
+    const Icon = result === "pass" ? Check : result === "block" ? CircleSlash : Minus;
+    return (
+      <li data-result={result}>
+        <Icon size={16} aria-hidden="true" />
+        <span className="visually-hidden">{result === "pass" ? "Passed" : result === "block" ? "Blocked" : "Skipped"}. </span>
+        <strong>{label}</strong>
+        <span>{detail}</span>
+      </li>
+    );
+  };
 
   return (
-    <section className="landing-section walkthrough" id="payment-walkthrough" aria-labelledby="walkthrough-title">
+    <section ref={sectionRef} className="landing-section walkthrough" id="payment-walkthrough" aria-labelledby="walkthrough-title">
       <header className="section-intro">
         <h2 id="walkthrough-title">From request to receipt.</h2>
-        <p className="lead">Choose a preset to see how your account policy handles the agent’s request.</p>
+        <p className="lead">Choose a simulated payment and follow it from the agent’s request to the activity record.</p>
       </header>
 
       <div className="walkthrough-panel">
         <div className="walkthrough-toolbar" role="group" aria-label="Payment scenario">
           {SCENARIOS.map((option) => (
-            <button key={option.label} type="button" aria-pressed={option === scenario} onClick={() => setScenario(option)}>
+            <button key={option.label} type="button" aria-pressed={option === scenario} onClick={() => { setScenario(option); setStep(0); setPlaying(true); }}>
               {option.label}
             </button>
           ))}
         </div>
 
-        <ol className="payment-stages" aria-live="polite">
-          <li>
-            <span className="stage-icon"><Bot size={19} aria-hidden="true" /></span>
-            <h3>Agent requests payment</h3>
-            <p className="stage-recipient"><img src={market.icon} width={21} height={21} alt="" /> {market.name}</p>
-            <p><strong>{near(scenario.amount)}</strong> requested by <code>market-agent</code>.</p>
-          </li>
-          <li>
-            <span className="stage-icon"><ShieldCheck size={19} aria-hidden="true" /></span>
-            <h3>Account checks the rules</h3>
-            <p>{blockedReason ?? (limits && `Recipient approved. ${near(scenario.amount)} fits the ${near(limits.perPayment)} per-payment cap.`)}</p>
-            {limits && <p className="stage-meta">{near(limits.daily)}/day for this recipient · {near(AGENT_DAILY_CAP)}/day for the agent</p>}
-          </li>
-          <li>
-            <span className={`stage-icon ${blockedReason ? "blocked" : "enabled"}`}>
-              {blockedReason ? <CircleSlash size={19} aria-hidden="true" /> : <ReceiptText size={19} aria-hidden="true" />}
-            </span>
-            <h3>{blockedReason ? "Transfer blocked" : "Transfer can proceed"}</h3>
-            <p>{blockedReason
-              ? "The account stops the request before funds move. Activity shows the rule that blocked it."
-              : "With daily budget and balance available, the account sends the transfer and records the settlement."}</p>
-          </li>
+        <ol className="payment-stages" aria-label="Payment steps">
+          {STAGES.map(({ label, icon: Icon }, index) => (
+            <li key={label} data-complete={index < step}>
+              <button type="button" aria-current={index === step ? "step" : undefined} aria-controls="payment-step-detail" onClick={() => { setStep(index); setPlaying(false); }}>
+                <span className="stage-icon">{index < step ? <Check size={17} aria-hidden="true" /> : <Icon size={17} aria-hidden="true" />}</span>
+                {label}
+              </button>
+            </li>
+          ))}
         </ol>
-        <a className="walkthrough-docs text-link" href={href("/docs/activity")}>How to read payment activity <ArrowRight size={15} aria-hidden="true" /></a>
+        <div className="payment-step-detail" id="payment-step-detail" aria-live={playing ? "off" : "polite"} aria-atomic="true">
+          <h3>{titles[step]}</h3>
+          {step === 0 && (
+            <>
+              <p>The runner for <code>market-agent</code> calls the registry with the payer, the recipient, the amount, and a unique request ID.</p>
+              <p className="stage-recipient"><img src={market.icon} width={24} height={24} alt="" /> {market.name} <strong>{amount}</strong></p>
+            </>
+          )}
+          {step === 1 && (
+            <>
+              <p>The registry checks the caller and the agent’s permissions before forwarding the request to the policy contract on the owner’s account.</p>
+              <ul className="payment-checks">
+                {rule("Executor", "Matches the registered runner", "pass")}
+                {rule("Agent status", "Active and unexpired", "pass")}
+                {rule("Agent capability", `${amount} fits the agent’s ${near(AGENT_PAYMENT_CAP)} request ceiling`, "pass")}
+              </ul>
+            </>
+          )}
+          {step === 2 && (
+            <>
+              <p>The wallet policy applies the owner’s approvals and limits. This simulation starts with payments enabled and an active spending approval for the agent.</p>
+              <ul className="payment-checks">
+                {rule("Recipient approval", limits ? `${market.name} is approved` : `${market.name} is not on the approved list`, limits ? "pass" : "block")}
+                {rule("Per-payment cap", limits ? `${amount} requested · ${near(limits.perPayment)} allowed` : "Skipped after the recipient check", limits ? (fitsPaymentCap ? "pass" : "block") : "skip")}
+                {rule("Daily budgets", limits && fitsPaymentCap
+                  ? `${near(RECIPIENT_USED + scenario.amount)} of ${near(limits.daily)} for the recipient · ${near(AGENT_USED + scenario.amount)} of ${near(AGENT_DAILY_CAP)} for the agent after this request`
+                  : "Skipped after an earlier rule blocked the request", fitsPaymentCap ? "pass" : "skip")}
+                {rule("Available balance", fitsPaymentCap ? `${near(AVAILABLE_BALANCE)} available · no account-wide cap set` : "Skipped after an earlier rule blocked the request", fitsPaymentCap ? "pass" : "skip")}
+              </ul>
+            </>
+          )}
+          {step === finalStep && (
+            <>
+              <p>{blockedReason
+                ? "The policy rejects the request before sending a transfer and records the reason in Activity."
+                : "The policy reserves the amount against the daily budgets, sends the transfer from the owner’s account, and records the settlement once the transfer succeeds."}</p>
+              <p className="payment-result" data-result={blockedReason ? "block" : "pass"}>
+                {blockedReason ? <CircleSlash size={17} aria-hidden="true" /> : <Check size={17} aria-hidden="true" />}
+                <strong>{market.name} · {amount} {blockedReason ? "requested" : "paid"}</strong>
+                <span>{blockedReason ?? "Settled"}</span>
+              </p>
+            </>
+          )}
+        </div>
+        <div className="walkthrough-footer">
+          <a className="text-link" href={href("/docs/activity")}>How to read payment activity <ArrowRight size={15} aria-hidden="true" /></a>
+          <div className="walkthrough-actions">
+            <button type="button" onClick={() => {
+              if (step === finalStep) { setStep(0); setPlaying(true); }
+              else setPlaying(!playing);
+            }}>
+              {step === finalStep ? <><RotateCcw size={15} aria-hidden="true" /> Replay</> : playing ? <><Pause size={15} aria-hidden="true" /> Pause</> : <><Play size={15} aria-hidden="true" /> Play</>}
+            </button>
+          </div>
+        </div>
       </div>
     </section>
   );

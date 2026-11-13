@@ -60,6 +60,28 @@ What stays: the contracts' checks, reason codes, branch budgets, the agent map, 
 
 Old phases absorbed: phase 9's MCP part moves to R4 and R6, phase 10's human approval moves to R5, and phase 12's integrations work starts in R6–R7. Typed trade actions remain in phase 12. Until they exist, connected agents can make payments only.
 
+### Design fixes from review (2026-11-13)
+
+These override the phase text below wherever they differ.
+
+| # | Fix |
+| --- | --- |
+| F1 | "Ask me first" requests live in their own bounded map, outside the request prune queue. `prune()` stops at the first pending request, so pending items in the queue would stall it. |
+| F2 | Generations are unique only per registry. Payers that move to a user-owned registry start with a fresh policy for the hackathon. `set_registry` plus a registry epoch on mandates is deferred. |
+| F3 | `authorize` returns `enum Authorization { Allowed { path }, Denied { reason, detail } }`. near-sdk panics on a `Result::Err` return. |
+| F4 | The registry's executor becomes `Option<AccountId>` in the new registry layout. Connected agents need no executor account. |
+| F5 | Every callback requires `env::promise_results_count() == 1`. The SDK never creates a function-call key with empty `methodNames`. |
+| F6 | Name the feature "Ask me first" with `confirm_above`, `confirm`, `decline`, and the status `AwaitingConfirmation`. "Approval" already means mandate, and `Pending` already means a transfer in flight. |
+| F7 | `confirm(agent_id, request_id, expected_revision)`, because request IDs are unique only per leaf. `confirm` and `decline` do not bump the policy revision. |
+| F8 | A transferred token's new holder can still create children in the original registry, paying for the storage. It can never pay from the new holder's account. The register form defaults to non-transferable. |
+| F9 | The SDK's `AddKey` always sets `allowance` and `methodNames`. A full-access permission is not representable in its type. |
+| F10 | Done in D0: the outside-project paragraph was removed from the README. |
+| F11 | The docs anchor `connect` belongs to "Connect a wallet", so the new section uses `connect-agent`. In R2, rewrite these statements, which become false: "the app never adds a function-call key" (Docs and the `wallet.tsx` header), and "the agent's key can only call the registry". |
+
+**Docs placeholder.** The Docs page's "Claude, ChatGPT and others" subsection is marked Coming soon. R3 and R4 must replace it with the real Connect panel and MCP steps when they ship.
+
+**Phase D0 (done 2026-11-13).** The Docs page has "How it works", with four figures: the parts, a payment step by step, which rule wins, and generations and approvals. The README has the matching ASCII diagrams. Each later phase adds its own docs section when it ships.
+
 ### R1: user-owned registry
 
 **Contract (`contracts/registry`):**

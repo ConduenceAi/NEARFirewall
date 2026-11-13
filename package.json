@@ -5,7 +5,7 @@
   "workspaces": ["packages/*", "apps/*"],
   "engines": { "node": ">=24" },
   "scripts": {
-    "test": "vitest run",
+    "test": "node scripts/test.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "contracts:test": "cargo test --workspace",
     "contracts:build": "cargo near build non-reproducible-wasm --no-abi --manifest-path contracts/registry/Cargo.toml && cargo near build non-reproducible-wasm --no-abi --manifest-path contracts/account-policy/Cargo.toml",

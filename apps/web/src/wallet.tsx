@@ -5,7 +5,7 @@
  * asks the owner to confirm it. This app never adds a function-call key to the
  * owner's account.
  */
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NearConnector } from "@fastnear/near-connect";
 import { fromBase64, type WalletTransaction } from "@nearfirewall/sdk";
 import { config } from "./config.ts";
@@ -21,7 +21,8 @@ export interface SendResult {
 
 interface WalletState {
   accountId: string | null;
-  connect(): Promise<void>;
+  connecting: boolean;
+  connect(): Promise<boolean>;
   disconnect(): Promise<void>;
   send(tx: WalletTransaction): Promise<SendResult>;
 }
@@ -48,19 +49,47 @@ function decodeOutcome(outcome: unknown): SendResult {
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [accountId, setAccountId] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const connectingRef = useRef(false);
 
   useEffect(() => {
-    connector.on("wallet:signIn", (event) => setAccountId(event.accounts[0]?.accountId ?? null));
-    connector.on("wallet:signOut", () => setAccountId(null));
+    let restore = true;
+    const signIn = (event: { accounts: { accountId: string }[] }) => {
+      restore = false;
+      setAccountId(event.accounts[0]?.accountId ?? null);
+    };
+    const signOut = () => {
+      restore = false;
+      setAccountId(null);
+    };
+    connector.on("wallet:signIn", signIn);
+    connector.on("wallet:signOut", signOut);
     connector
       .wallet()
       .then((wallet) => wallet.getAccounts())
-      .then((accounts) => setAccountId(accounts[0]?.accountId ?? null))
-      .catch(() => setAccountId(null));
+      .then((accounts) => { if (restore) setAccountId(accounts[0]?.accountId ?? null); })
+      .catch(() => { if (restore) setAccountId(null); });
+    return () => {
+      restore = false;
+      connector.off("wallet:signIn", signIn);
+      connector.off("wallet:signOut", signOut);
+    };
   }, []);
 
   const connect = useCallback(async () => {
-    await connector.connect();
+    if (connectingRef.current) return false;
+    connectingRef.current = true;
+    setConnecting(true);
+    try {
+      await connector.connect();
+      return true;
+    } catch (error) {
+      if (error instanceof Error && ["User rejected", "Wallet closed"].includes(error.message)) return false;
+      throw error;
+    } finally {
+      connectingRef.current = false;
+      setConnecting(false);
+    }
   }, []);
 
   const disconnect = useCallback(async () => {
@@ -78,7 +107,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     return decodeOutcome(outcome);
   }, []);
 
-  const value = useMemo(() => ({ accountId, connect, disconnect, send }), [accountId, connect, disconnect, send]);
+  const value = useMemo(() => ({ accountId, connecting, connect, disconnect, send }), [accountId, connecting, connect, disconnect, send]);
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
 }
 

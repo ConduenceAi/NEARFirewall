@@ -2,7 +2,7 @@
 
 NEARFirewall registers agents and lets a user authorize them to pay from the user's existing NEAR account. Each recipient approval includes its own spending limits. Payments that fit the recipient's limits and the agent's overall budget execute automatically. The account that already holds the funds runs the policy and sends the payment.
 
-**Status:** Hackathon build in progress. The contracts, SDK, templates, runner, and web app are implemented and unit-tested. They have not been deployed yet. The first deployment target is NEAR Testnet; see the [Testnet runbook](docs/testnet-runbook.md).
+**Status:** Live on NEAR Testnet. The registry and a demo payer are deployed (see [`deployments/testnet.json`](deployments/testnet.json)), and scripted agents have made and been refused real payments there. To run it, see the [Testnet runbook](docs/testnet-runbook.md).
 
 ## Hackathon MVP
 
@@ -24,11 +24,42 @@ The core demo is a web app, a shared registry, the account policy contract, and 
 | Account policy contract | Run on the user's existing NEAR account. Store its mandates and enforce recipient approvals, spending limits, balance, and pause state before scheduling a transfer. |
 | Agent runner | Submit a typed payment request using a restricted key on the separate executor account. |
 
+The parts, and who calls whom:
+
 ```text
-Alice → NEARFirewall app → Meteor → register agent / approve recipient / set limits
-Agent executor → registry.execute → Alice's account policy → approved recipient
-                                           │
-                                           └─ denial or settlement → activity log
+                  You (wallet) ── every change is signed by you, with 1 yoctoNEAR ──┐
+                       │ manage agents                                set rules  │
+                       ▼                                                          ▼
+executor account ── execute ──▶ registry (agent NFTs) ── forward ──▶ your account (payment policy)
+ (restricted key)                                                                 │ NEAR
+                                                                                  ▼
+                                                                              recipient
+```
+
+A payment, step by step:
+
+```text
+executor           registry                    your account (policy)               recipient
+   │ 1 execute ──▶ │ 2 check agent and path     │                                    │
+   │ ◀─ ✕ denied ── │   (nothing reaches you)    │                                    │
+   │               │ 3 forward ───────────────▶ │ 4 check every rule                 │
+   │ ◀────────────────────────── ✕ denied ───── │   (nothing reserved or sent)       │
+   │               │                            │ 5 reserve the amount               │
+   │               │                            │ 6 send NEAR ─────────────────────▶ │
+   │               │                            │ 7 settle; a failed transfer is released
+   │ ◀────────── 8 the outcome (settled, failed, denied + reason) is the transaction's value
+```
+
+Which rule wins: every check must pass, in this order, and the first failure returns its reason:
+
+```text
+registry   agent exists, request from its executor, request ID valid
+           for each agent from the top of the tree down: not removed → not paused → not expired → capability allows the amount
+           the paying account holds the requesting agent
+policy     request from the trusted registry, request ID unused → payments on → policy revision (if asked)
+           for each approval on the agent's path: not revoked → not stale → not expired
+               → recipient approved → rule unexpired → per-payment → recipient daily → branch daily
+           at least one approval → account daily cap → available balance
 ```
 
 The registry accepts the registered executor, checks access, and forwards a typed payment request. The payer's contract accepts routed requests from the registry account configured at initialization and checks its own mandate independently. NEAR executes the registry call, policy call, transfer, and settlement callback in separate receipts. [NEAR cross-contract calls](https://docs.near.org/smart-contracts/anatomy/crosscontract)
@@ -186,8 +217,6 @@ Planned policy extensions:
 The [implementation plan](docs/implementation-plan.md) orders this work by phase.
 
 Additional work can extend the same model to fungible assets, typed trading adapters, paid rentals, and an optional Telegram alert worker. Asset transfers use the account's own token balance and the applicable token standards. [NEP-141 fungible tokens](https://github.com/near/NEPs/blob/master/neps/nep-0141.md) · [NEP-145 storage management](https://github.com/near/NEPs/blob/master/neps/nep-0145.md)
-
-A future approval for a service such as Polymarket would bind the policy to the specific network, asset, target contract, and allowed operation. Polymarket uses trading collateral on Polygon, so that flow requires a compatible adapter and an enforcement point on the spending route. The Testnet demo exercises recipient limits with native NEAR transfers. [Polymarket collateral and exchange documentation](https://help.polymarket.com/en/articles/14762452-polymarket-exchange-upgrade-april-28-2026)
 
 ## Repository
 

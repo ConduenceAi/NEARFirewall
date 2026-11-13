@@ -1,8 +1,9 @@
 import { ArrowDown, ArrowRight, Bot, Gauge, GitBranch, KeyRound, Plus, ShieldCheck, Wallet } from "lucide-react";
 import { PaymentPolicyPreview, PaymentWalkthrough } from "../components/PaymentPolicyPreview.tsx";
 import { Topbar } from "../components/Topbar.tsx";
+import { WalletEntry } from "../components/WalletEntry.tsx";
+import { config } from "../config.ts";
 import { href } from "../router.ts";
-import { useWallet } from "../wallet.tsx";
 
 const STEPS = [
   { icon: Wallet, title: "Connect your wallet", text: "Use Meteor or another NEAR wallet. Keep your existing address and balance." },
@@ -25,20 +26,22 @@ const QUESTIONS = [
 ];
 
 export function Landing() {
-  const { accountId } = useWallet();
   return (
     <div className="landing">
-      <Topbar current="home" />
+      <Topbar />
       <main>
         <section className="hero" aria-labelledby="hero-title">
           <div className="hero-art" aria-hidden="true" />
           <div className="hero-inner">
             <div className="hero-copy">
-              <span className="eyebrow"><i /> On-chain spending controls</span>
+              <div className="eyebrow hero-eyebrow">
+                <span>On-chain spending controls</span>
+                <span className="hero-network"><i aria-hidden="true" />{config.network}</span>
+              </div>
               <h1 id="hero-title">Let agents pay.<br /><span>Keep the keys.</span></h1>
               <p className="lead">Give agents a budget from your existing NEAR account. You choose who they can pay and how much. NEARFirewall enforces the rules on-chain.</p>
               <div className="cta-row">
-                <a className="btn primary" href={href("/app/map")}>{accountId ? "Open dashboard" : "Launch app"} <ArrowRight size={16} /></a>
+                <WalletEntry placement="landing" />
                 <a className="text-link" href={href("/docs")}>Read the docs <ArrowRight size={15} /></a>
               </div>
             </div>
@@ -97,7 +100,7 @@ export function Landing() {
 
         <section className="landing-section launch-strip" aria-labelledby="launch-title">
           <h2 id="launch-title">Put your first agent on a budget.</h2>
-          <a className="btn primary" href={href("/app/map")}>{accountId ? "Open dashboard" : "Launch app"} <ArrowRight size={16} aria-hidden="true" /></a>
+          <WalletEntry placement="landing" />
         </section>
       </main>
 
