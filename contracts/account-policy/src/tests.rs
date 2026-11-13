@@ -1486,3 +1486,310 @@ fn preview_reports_when_confirmation_is_needed() {
     assert!(preview.allowed);
     assert!(preview.needs_confirmation);
 }
+
+// ---------------------------------------------------------------- blocklist and guardians (R7)
+
+fn guardian_policy() -> (AccountPolicy, PublicKey) {
+    let mut p = readme_policy();
+    let key = agent_key(42);
+    as_owner(T0);
+    p.add_guardian_key(key.clone(), "watcher".into());
+    (p, key)
+}
+
+#[test]
+fn blocked_recipients_are_refused_even_when_approved() {
+    let mut p = readme_policy();
+    assert_eq!(exec(&mut p, "vendor.testnet", 1, 1), settled(1));
+    as_owner(T0);
+    p.block_recipient(acc("vendor.testnet"), Some("hijacked site".into()));
+    assert_eq!(
+        exec(&mut p, "vendor.testnet", 1, 2),
+        denied(Reason::RecipientBlocked)
+    );
+    // Other approved recipients are unaffected.
+    assert_eq!(exec(&mut p, "vendor2.testnet", 1, 3), settled(3));
+    assert!(p.is_blocked(acc("vendor.testnet")));
+    let list = p.get_blocklist();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].by, "owner");
+    assert_eq!(list[0].reason.as_deref(), Some("hijacked site"));
+    assert_eq!(p.get_policy().blocked, 1);
+    assert_eq!(
+        p.get_activity(None, Some(2))[1].reason,
+        Some(Reason::RecipientBlocked)
+    );
+}
+
+#[test]
+fn the_blocklist_applies_to_connections_too() {
+    let (mut p, key) = connected_policy();
+    as_owner(T0);
+    p.block_recipient(acc("vendor.testnet"), None);
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("1", 10)]),
+            "vendor.testnet",
+            1,
+            1
+        ),
+        denied(Reason::RecipientBlocked)
+    );
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+}
+
+#[test]
+fn unblocking_restores_the_approval() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    p.block_recipient(acc("vendor.testnet"), None);
+    assert_eq!(
+        exec(&mut p, "vendor.testnet", 1, 1),
+        denied(Reason::RecipientBlocked)
+    );
+    as_owner(T0);
+    p.unblock_recipient(acc("vendor.testnet"));
+    assert!(!p.is_blocked(acc("vendor.testnet")));
+    assert_eq!(exec(&mut p, "vendor.testnet", 1, 2), settled(2));
+}
+
+#[test]
+#[should_panic(expected = "This recipient is not blocked")]
+fn unblocking_an_unknown_recipient_fails() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    p.unblock_recipient(acc("vendor.testnet"));
+}
+
+#[test]
+fn a_recipient_blocked_while_waiting_is_declined_at_confirmation() {
+    let mut p = confirming_policy();
+    awaiting(&mut p, "vendor.testnet", 5, 1);
+    as_owner(T0 + 5);
+    p.block_recipient(acc("vendor.testnet"), Some("flagged".into()));
+    as_callback(T0 + 20);
+    let outcome = p.on_confirm_authorized(request_key("1", &rid(1)), allowed(vec![node("1", 10)]));
+    assert!(matches!(
+        outcome,
+        PromiseOrValue::Value(Outcome::Denied {
+            reason: Reason::RecipientBlocked,
+            ..
+        })
+    ));
+    assert_eq!(p.get_policy().reserved_total, U128(0));
+    assert_eq!(
+        p.get_request("1".into(), rid(1)).unwrap().status,
+        RequestStatus::Declined
+    );
+}
+
+#[test]
+fn preview_reports_a_blocked_recipient() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    p.block_recipient(acc("vendor.testnet"), None);
+    set_env(acc("anyone.testnet"), 0, T0, 100);
+    let preview = p.preview(ExecContext {
+        path: vec![node("1", 10)],
+        executor: acc("runner.testnet"),
+        action: pay("vendor.testnet", 1),
+        request_id: rid(1),
+        expected_revision: None,
+    });
+    assert!(!preview.allowed);
+    assert_eq!(preview.reason, Some(Reason::RecipientBlocked));
+}
+
+#[test]
+#[should_panic(expected = "The account cannot block itself")]
+fn the_account_cannot_block_itself() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    p.block_recipient(alice(), None);
+}
+
+#[test]
+#[should_panic(expected = "The blocklist is full")]
+fn the_blocklist_is_bounded() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    for i in 0..=MAX_BLOCKED {
+        p.block_recipient(acc(&format!("scam{i}.testnet")), None);
+    }
+}
+
+#[test]
+fn a_guardian_adds_blocks_without_a_deposit() {
+    let (mut p, key) = guardian_policy();
+    let revision = p.get_revision();
+    as_key(&key, T0 + 5, 30);
+    assert!(p.guardian_block(acc("vendor.testnet"), Some("fingerprint mismatch".into())));
+    let entry = &p.get_blocklist()[0];
+    assert_eq!(entry.by, "guardian:watcher");
+    assert_eq!(entry.reason.as_deref(), Some("fingerprint mismatch"));
+    let guardian = &p.get_guardians()[0];
+    assert_eq!((guardian.blocks, guardian.last_used.is_some()), (1, true));
+    assert_eq!(p.get_revision(), revision + 1);
+    assert_eq!(p.get_policy().guardians, 1);
+    // Every agent is refused from the next request, though the recipient was approved.
+    assert_eq!(
+        exec(&mut p, "vendor.testnet", 1, 1),
+        denied(Reason::RecipientBlocked)
+    );
+}
+
+#[test]
+fn guardian_blocks_are_idempotent_and_never_overwrite_the_owner() {
+    let (mut p, key) = guardian_policy();
+    as_owner(T0);
+    p.block_recipient(acc("owned.testnet"), Some("mine".into()));
+    as_key(&key, T0, 30);
+    assert!(!p.guardian_block(acc("owned.testnet"), Some("theirs".into())));
+    assert_eq!(p.get_blocklist()[0].by, "owner");
+    assert_eq!(p.get_blocklist()[0].reason.as_deref(), Some("mine"));
+    assert!(p.guardian_block(acc("scam.testnet"), None));
+    let revision = p.get_revision();
+    assert!(!p.guardian_block(acc("scam.testnet"), None));
+    assert_eq!(p.get_revision(), revision);
+}
+
+#[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn a_guardian_cannot_unblock() {
+    let (mut p, key) = guardian_policy();
+    as_owner(T0);
+    p.block_recipient(acc("scam.testnet"), None);
+    // The guardian key signs a transaction on the account, but owner methods need a deposit.
+    as_key(&key, T0, 30);
+    p.unblock_recipient(acc("scam.testnet"));
+}
+
+#[test]
+#[should_panic(expected = "exactly 1 yoctoNEAR")]
+fn a_guardian_cannot_change_approvals() {
+    let (mut p, key) = guardian_policy();
+    as_key(&key, T0, 30);
+    p.approve_recipient(
+        "1".into(),
+        acc("attacker.testnet"),
+        U128(NEAR),
+        U128(NEAR),
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "This key is not a guardian")]
+fn only_guardian_keys_can_call_guardian_block() {
+    let (mut p, key) = connected_policy(); // a connected agent key, not a guardian
+    as_key(&key, T0, 30);
+    p.guardian_block(acc("scam.testnet"), None);
+}
+
+#[test]
+#[should_panic(expected = "Only a guardian key on this account can call this")]
+fn a_relayed_guardian_call_is_refused() {
+    let (mut p, key) = guardian_policy();
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(alice())
+        .predecessor_account_id(alice())
+        .signer_account_id(acc("relayer.testnet"))
+        .signer_account_pk(key);
+    testing_env!(b.build());
+    p.guardian_block(acc("scam.testnet"), None);
+}
+
+#[test]
+#[should_panic(expected = "A guardian cannot attach a deposit")]
+fn a_guardian_cannot_attach_a_deposit() {
+    let (mut p, key) = guardian_policy();
+    let mut b = VMContextBuilder::new();
+    b.current_account_id(alice())
+        .predecessor_account_id(alice())
+        .signer_account_id(alice())
+        .signer_account_pk(key)
+        .attached_deposit(NearToken::from_yoctonear(1));
+    testing_env!(b.build());
+    p.guardian_block(acc("scam.testnet"), None);
+}
+
+#[test]
+#[should_panic(expected = "Guardians have reached their limit")]
+fn guardians_cannot_fill_the_blocklist() {
+    let (mut p, key) = guardian_policy();
+    as_key(&key, T0, 30);
+    for i in 0..=MAX_GUARDIAN_BLOCKS {
+        p.guardian_block(acc(&format!("scam{i}.testnet")), None);
+    }
+}
+
+#[test]
+fn the_owner_can_still_block_when_guardians_are_at_their_limit() {
+    let (mut p, key) = guardian_policy();
+    as_key(&key, T0, 30);
+    for i in 0..MAX_GUARDIAN_BLOCKS {
+        assert!(p.guardian_block(acc(&format!("scam{i}.testnet")), None));
+    }
+    as_owner(T0);
+    p.block_recipient(acc("another.testnet"), None);
+    assert_eq!(p.get_policy().blocked as usize, MAX_GUARDIAN_BLOCKS + 1);
+}
+
+#[test]
+#[should_panic(expected = "This key is not a guardian")]
+fn a_removed_guardian_stops_working() {
+    let (mut p, key) = guardian_policy();
+    as_owner(T0);
+    p.remove_guardian_key(key.clone());
+    as_key(&key, T0, 30);
+    p.guardian_block(acc("scam.testnet"), None);
+}
+
+#[test]
+fn removing_a_guardian_keeps_its_entries_for_the_owner_to_review() {
+    let (mut p, key) = guardian_policy();
+    as_key(&key, T0, 30);
+    p.guardian_block(acc("scam.testnet"), None);
+    as_owner(T0);
+    p.remove_guardian_key(key);
+    assert_eq!(p.get_guardians().len(), 0);
+    assert_eq!(p.get_blocklist().len(), 1);
+    p.unblock_recipient(acc("scam.testnet"));
+    assert_eq!(p.get_blocklist().len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "This key is a guardian key")]
+fn a_guardian_key_cannot_become_a_connection() {
+    let (mut p, key) = guardian_policy();
+    as_owner(T0);
+    p.connect_agent_key("1".into(), key, "custom".into(), "x".into());
+}
+
+#[test]
+#[should_panic(expected = "This key is a connected agent key")]
+fn a_connected_key_cannot_become_a_guardian() {
+    let (mut p, key) = connected_policy();
+    as_owner(T0);
+    p.add_guardian_key(key, "x".into());
+}
+
+#[test]
+#[should_panic(expected = "Too many guardians")]
+fn guardians_are_limited() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    for i in 0..=MAX_GUARDIANS as u8 {
+        p.add_guardian_key(agent_key(100 + i), format!("watcher {i}"));
+    }
+}
+
+#[test]
+#[should_panic(expected = "Only the account itself can change its policy")]
+fn only_the_owner_adds_guardians() {
+    let mut p = readme_policy();
+    set_env(registry(), 1, T0, 100);
+    p.add_guardian_key(agent_key(1), "x".into());
+}

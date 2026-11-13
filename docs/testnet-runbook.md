@@ -15,6 +15,15 @@ The original demo commands were run on Windows on 2026-11-12 with `cargo-near` 0
 5. From Agents or the map, choose **Connect**, pick a local client and sign the restricted-key transaction. Use the configuration in the panel to launch the local MCP server. Verify `get_rules`, request 2 NEAR to the approved recipient, and request 4.5 NEAR to exercise **Ask me first**.
 6. Confirm or decline the waiting payment in **Payments**. Select the connection in the agent map and choose **Disconnect key**. Check that the local client can no longer submit a payment.
 
+Without a browser, two scripts run the same flow for a CLI-controlled owner whose key is in `~/.near-credentials`:
+
+```bash
+node scripts/v2-owner.ts <owner>.testnet setup     # agents.<owner>, policy, agent "trader", rules with ask-me-first above 4 NEAR
+node scripts/v2-owner.ts <owner>.testnet connect   # restricted key; secret saved under ~/.near-credentials/testnet/<owner>/
+node scripts/mcp-smoke.ts <owner>.testnet          # starts the real MCP server over stdio and calls its tools
+node scripts/v2-owner.ts <owner>.testnet pending | confirm <request-id> | decline <request-id> | disconnect | status
+```
+
 The handoff recorded the Testnet flow using the CLI and local MCP on `nfw-owner-1113.testnet`, with the key subsequently deleted. The dashboard has been exercised with a mock wallet. A fresh signed Meteor walkthrough and global-contract publication are pending.
 
 ## Current deployment

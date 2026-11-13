@@ -3,7 +3,9 @@ import type { NearRpc } from "./rpc.ts";
 import { EMPTY_CODE_HASH } from "./rpc.ts";
 import {
   AgentView,
+  BlockedRecipient,
   Connection,
+  Guardian,
   Mandate,
   PendingConfirmation,
   PathNode,
@@ -124,6 +126,20 @@ export class PolicyClient {
 
   getConnection(publicKey: string) {
     return viewParsed(this.rpc, this.payerId, "get_connection", { public_key: publicKey }, Connection.nullable());
+  }
+
+  /** Recipients no agent may pay. */
+  getBlocklist() {
+    return viewParsed(this.rpc, this.payerId, "get_blocklist", {}, z.array(BlockedRecipient));
+  }
+
+  isBlocked(recipient: string) {
+    return viewParsed(this.rpc, this.payerId, "is_blocked", { recipient }, z.boolean());
+  }
+
+  /** Watcher keys that can only add to the blocklist. */
+  getGuardians() {
+    return viewParsed(this.rpc, this.payerId, "get_guardians", {}, z.array(Guardian));
   }
 
   /** Payments waiting for the owner's confirmation. */

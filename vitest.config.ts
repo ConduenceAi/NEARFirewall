@@ -4,6 +4,6 @@ import { defineConfig } from "vitest/config";
 // drive-letter casing issue that makes Vitest load itself twice.
 export default defineConfig({
   test: {
-    include: ["packages/*/test/**/*.test.ts", "apps/runner/test/**/*.test.ts", "apps/web/test/**/*.test.ts"],
+    include: ["packages/*/test/**/*.test.ts", "apps/runner/test/**/*.test.ts", "apps/web/test/**/*.test.ts", "apps/gateway/test/**/*.test.ts"],
   },
 });

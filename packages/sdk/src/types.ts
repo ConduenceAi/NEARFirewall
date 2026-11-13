@@ -47,6 +47,7 @@ export const REASONS = [
   "CONFIRMATION_DECLINED",
   "CONFIRMATION_EXPIRED",
   "TOO_MANY_PENDING",
+  "RECIPIENT_BLOCKED",
 ] as const;
 export const Reason = z.enum(REASONS);
 export type Reason = z.infer<typeof Reason>;
@@ -147,6 +148,8 @@ export const PolicyView = z.object({
   day: NumU64,
   connections: z.number().optional(),
   pending: z.number().optional(),
+  blocked: z.number().optional(),
+  guardians: z.number().optional(),
 });
 export type PolicyView = z.infer<typeof PolicyView>;
 
@@ -212,6 +215,25 @@ export const Connection = z.object({
 });
 export type Connection = z.infer<typeof Connection>;
 
+/** An account no agent may pay. `by` is `owner` or `guardian:<label>`. */
+export const BlockedRecipient = z.object({
+  recipient: AccountId,
+  at: NumU64,
+  by: z.string(),
+  reason: z.string().nullable().optional(),
+});
+export type BlockedRecipient = z.infer<typeof BlockedRecipient>;
+
+/** A watcher key that can add to the blocklist and do nothing else. */
+export const Guardian = z.object({
+  public_key: z.string(),
+  label: z.string(),
+  created_at: NumU64,
+  last_used: NumU64.nullable(),
+  blocks: z.number(),
+});
+export type Guardian = z.infer<typeof Guardian>;
+
 /** A payment waiting for the owner ("ask me first"). */
 export const PendingConfirmation = z.object({
   leaf: z.string(),
@@ -239,6 +261,8 @@ export const SUPPORTED_LOCKS = LOCKS.NO_TRANSFER | LOCKS.NO_CAPABILITY_RAISE;
 export const MAX_DEPTH = 8;
 /** The only method a connection key may call on the owner's account. */
 export const AGENT_EXECUTE_METHOD = "agent_execute";
+/** The only method a guardian key may call on the owner's account. */
+export const GUARDIAN_BLOCK_METHOD = "guardian_block";
 /** The registry account for an owner: a sub-account of the owner's own account. */
 export function registryAccountFor(owner: string): string {
   return `agents.${owner}`;

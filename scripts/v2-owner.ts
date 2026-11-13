@@ -10,6 +10,12 @@
  *   node scripts/v2-owner.ts <owner> connect [--agent trader] [--platform claude-desktop] [--label "Claude on laptop"]
  *       adds a connection key; its secret is saved to ~/.near-credentials/<network>/<owner>/connection-<agent>.json
  *   node scripts/v2-owner.ts <owner> pending | confirm <request-id> | decline <request-id> | disconnect [--agent trader] | status
+ *   node scripts/v2-owner.ts <owner> block <recipient> [--reason "..."] | unblock <recipient>
+ *   node scripts/v2-owner.ts <owner> guardian-add [--label watcher] | guardian-remove [--label watcher]
+ *       the guardian key can only add to the blocklist; its secret is saved to
+ *       ~/.near-credentials/<network>/<owner>/guardian-<label>.json
+ *   node scripts/v2-owner.ts <owner> access [--agent trader] [--allow a.com,b.com] [--block c.com]
+ *       writes the agent's browsing rules as public records (access.allowed_domains / access.blocked_domains)
  */
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -20,6 +26,10 @@ import {
   PolicyClient,
   RegistryClient,
   checkRegistry,
+  ACCESS_ALLOWED_KEY,
+  ACCESS_BLOCKED_KEY,
+  addGuardianKey,
+  blockRecipient,
   confirmPayment,
   connectAgentKey,
   createRegistry,
@@ -31,7 +41,10 @@ import {
   parseNear,
   registerAgent,
   registryAccountFor,
+  removeGuardianKey,
   setMandate,
+  setRecord,
+  unblockRecipient,
   transferCapability,
 } from "@nearfirewall/sdk";
 import { ownerAccount, send } from "./lib/sign.ts";
@@ -133,6 +146,11 @@ async function status() {
     `${owner}: payments ${p.paused ? "PAUSED" : "on"}, registry ${p.registry}, available ${formatNear(p.available_balance)} NEAR, ` +
       `reserved ${formatNear(p.reserved_total)} NEAR, ${p.connections ?? 0} connection(s), ${p.pending ?? 0} waiting`,
   );
+  const blocked = await policy.getBlocklist().catch(() => []);
+  for (const b of blocked) console.log(`  blocked ${b.recipient} by ${b.by}${b.reason ? ` (${b.reason})` : ""}`);
+  for (const g of await policy.getGuardians().catch(() => [])) {
+    console.log(`  guardian "${g.label}" ${g.public_key.slice(0, 20)}… · ${g.blocks} block(s)`);
+  }
   for (const c of await policy.getConnections()) {
     console.log(`  key ${c.public_key.slice(0, 20)}… → agent #${c.agent_id} · ${c.platform} · "${c.label}" · used ${c.uses}×`);
   }
@@ -171,6 +189,42 @@ switch (command) {
     const { public_key } = JSON.parse(await readFile(connectionFile, "utf8")) as { public_key: string };
     const keys = await rpc.viewAccessKeys(owner);
     await step("disconnect", disconnectAgentKey(owner, public_key, { keyPresent: keys.some((k) => k.publicKey === public_key) }));
+    break;
+  }
+  case "block": {
+    await step(`block ${rest[0]}`, blockRecipient(owner, rest[0] ?? fail("Give the recipient."), flag("reason", "") || undefined));
+    break;
+  }
+  case "unblock": {
+    await step(`unblock ${rest[0]}`, unblockRecipient(owner, rest[0] ?? fail("Give the recipient.")));
+    break;
+  }
+  case "guardian-add": {
+    const label = flag("label", "watcher");
+    const keyPair = KeyPair.fromRandom("ed25519");
+    const publicKey = keyPair.getPublicKey().toString();
+    await step(`add guardian "${label}"`, addGuardianKey(owner, { publicKey, label }));
+    const file = join(homedir(), ".near-credentials", network, owner, `guardian-${label}.json`);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify({ account_id: owner, public_key: publicKey, private_key: keyPair.toString() }, null, 2));
+    console.log(`  guardian key ${publicKey} saved to ${file}`);
+    break;
+  }
+  case "guardian-remove": {
+    const label = flag("label", "watcher");
+    const file = join(homedir(), ".near-credentials", network, owner, `guardian-${label}.json`);
+    const { public_key } = JSON.parse(await readFile(file, "utf8")) as { public_key: string };
+    const keys = await rpc.viewAccessKeys(owner);
+    await step(`remove guardian "${label}"`, removeGuardianKey(owner, public_key, { keyPresent: keys.some((k) => k.publicKey === public_key) }));
+    break;
+  }
+  case "access": {
+    const id = await agentId();
+    const allow = flag("allow", "");
+    const block = flag("block", "");
+    if (!allow && !block) fail("Give --allow and/or --block with comma-separated domains.");
+    if (allow) await step(`allow only: ${allow}`, setRecord(registryId, id, ACCESS_ALLOWED_KEY, allow));
+    if (block) await step(`never: ${block}`, setRecord(registryId, id, ACCESS_BLOCKED_KEY, block));
     break;
   }
   case "status":

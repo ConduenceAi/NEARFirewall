@@ -34,6 +34,7 @@ export const REASON_TEXT: Record<Reason, string> = {
   CONFIRMATION_DECLINED: "The owner declined this payment, or a recheck at confirmation refused it.",
   CONFIRMATION_EXPIRED: "Nobody confirmed this payment in time, so it was released.",
   TOO_MANY_PENDING: "Too many payments are already waiting for the owner's confirmation.",
+  RECIPIENT_BLOCKED: "This recipient is on the owner's blocklist, so no agent may pay it.",
 };
 
 export function describeReason(reason: Reason): string {

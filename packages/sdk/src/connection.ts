@@ -13,6 +13,7 @@ import { MemoryJournalStore, OperationJournal, newRequestId, parseFinalStatus, t
 import { toWireAction } from "./owner.ts";
 import type { NearRpc } from "./rpc.ts";
 import { describeReason } from "./reasons.ts";
+import { loadAccessRules, type AccessRules } from "./access.ts";
 import type { Action, Connection, Mandate, Outcome } from "./types.ts";
 
 /** Gas for `agent_execute`: the registry check, the policy check, the transfer, and settlement. */
@@ -36,6 +37,8 @@ export interface AgentRules {
   recipients: { recipient: string; perPayment: bigint; daily: bigint; usedToday: bigint; confirmAbove: bigint | null }[];
   budgets: { agentId: string; handle: string; daily: bigint; usedToday: bigint }[];
   availableBalance: bigint;
+  /** Approved recipients the owner has since blocked. Every agent is refused for these. */
+  blocked: string[];
 }
 
 export interface AgentPayResult {
@@ -121,8 +124,10 @@ export class AgentConnection {
     const maxPerPayment = nodes.some((n) => !n?.capabilities.transfer_near)
       ? null
       : minBig(nodes.map((n) => n?.capabilities.transfer_near?.max_per_payment));
+    const blocklist = new Set((await this.policy.getBlocklist().catch(() => [])).map((b) => b.recipient));
     const recipientSets = mandates.map((m) => m.mandate.recipients);
-    const names = recipientSets.length === 0 ? [] : Object.keys(recipientSets[0]!).filter((r) => recipientSets.every((s) => r in s));
+    const approved = recipientSets.length === 0 ? [] : Object.keys(recipientSets[0]!).filter((r) => recipientSets.every((s) => r in s));
+    const names = approved.filter((r) => !blocklist.has(r));
     const own = mandates.at(-1);
     const recipients = await Promise.all(
       names.map(async (recipient) => {
@@ -156,7 +161,14 @@ export class AgentConnection {
       recipients,
       budgets,
       availableBalance: policyView.available_balance,
+      blocked: approved.filter((r) => blocklist.has(r)),
     };
+  }
+
+  /** The owner's browsing rules for this agent: its own and those of every agent above it. */
+  async accessRules(): Promise<AccessRules> {
+    const connection = await this.connection();
+    return loadAccessRules(await this.registry(), connection.agent_id);
   }
 
   /** Would this payment be allowed by the owner's policy? Reads only; nothing moves. */

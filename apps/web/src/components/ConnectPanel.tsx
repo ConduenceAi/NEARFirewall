@@ -9,6 +9,7 @@ import { href } from "../router.ts";
 import { useAction, useAsync } from "../hooks.ts";
 import { platforms, searchPlatforms, type AgentPlatform } from "../platforms.ts";
 import { useWallet } from "../wallet.tsx";
+import { GatewaySetup } from "./GatewaySetup.tsx";
 
 export function ConnectPanel({ agent, accountId, onClose, onChanged }: {
   agent: AgentView;
@@ -60,7 +61,7 @@ export function ConnectPanel({ agent, accountId, onClose, onChanged }: {
   }
 
   async function create() {
-    if (!platform?.setup) return;
+    if (!platform?.setup && !platform?.gateway) return;
     await action.run("Connect agent", async () => {
       const name = label.trim();
       const fees = parseNear(allowance);
@@ -113,7 +114,7 @@ export function ConnectPanel({ agent, accountId, onClose, onChanged }: {
         {platform && !verified && (
           <>
             <h3>{platform.name}</h3>
-            {!platform.setup ? (
+            {!platform.setup && !platform.gateway ? (
               <p>Setup for this platform is unavailable in this release. Choose a local MCP client to connect now.</p>
             ) : (
               <form onSubmit={(e) => { e.preventDefault(); if (!action.busy && !key) void create(); }}>
@@ -133,7 +134,9 @@ export function ConnectPanel({ agent, accountId, onClose, onChanged }: {
           </>
         )}
         {action.message?.kind === "error" && <p className="notice error" role="alert">{action.message.text}</p>}
-        {key && verified && platform && <ConnectionSetup accountId={accountId} secretKey={key.secretKey} platform={platform} onDone={onClose} />}
+        {key && verified && platform && (platform.gateway
+          ? <GatewaySetup accountId={accountId} secretKey={key.secretKey} platform={platform} onDone={onClose} />
+          : <ConnectionSetup accountId={accountId} secretKey={key.secretKey} platform={platform} onDone={onClose} />)}
       </div>
     </dialog>
   );

@@ -210,6 +210,7 @@ pub enum Reason {
     ConfirmationDeclined,
     ConfirmationExpired,
     TooManyPending,
+    RecipientBlocked,
 }
 
 impl Reason {
@@ -248,6 +249,7 @@ impl Reason {
             Reason::ConfirmationDeclined => "CONFIRMATION_DECLINED",
             Reason::ConfirmationExpired => "CONFIRMATION_EXPIRED",
             Reason::TooManyPending => "TOO_MANY_PENDING",
+            Reason::RecipientBlocked => "RECIPIENT_BLOCKED",
         }
     }
 }
@@ -328,6 +330,7 @@ mod tests {
             Reason::InsufficientBalance,
             Reason::UnknownConnection,
             Reason::TooManyPending,
+            Reason::RecipientBlocked,
         ] {
             let json = near_sdk::serde_json::to_string(&reason).unwrap();
             assert_eq!(json, format!("\"{}\"", reason.code()));

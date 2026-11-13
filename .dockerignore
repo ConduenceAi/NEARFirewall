@@ -1,0 +1,12 @@
+.git
+node_modules
+**/node_modules
+target
+contracts
+docs
+scripts/demo.env
+.runner
+apps/web/dist
+apps/web/public
+**/.env
+**/.env.*

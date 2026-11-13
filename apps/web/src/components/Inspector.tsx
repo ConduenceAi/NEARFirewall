@@ -227,6 +227,14 @@ function AccountDetails({ data, busy, exec }: { data: MapData; busy: boolean; ex
   else if (p && approved === 0) {
     gaps.push({ level: "warn", text: "No agent is approved to pay anyone.", action: { label: "Approve recipients", path: "/app/payments" } });
   }
+  if (data.blocked.length > 0) {
+    const byGuardians = data.blocked.filter((b) => b.by !== "owner").length;
+    gaps.push({
+      level: "info",
+      text: `${data.blocked.length} recipient${data.blocked.length === 1 ? " is" : "s are"} blocked for every agent${byGuardians ? `, ${byGuardians} added by guardians` : ""}. Review them in Payments.`,
+      action: { label: "Blocked recipients", path: "/app/payments" },
+    });
+  }
   if (p && p.account_daily_cap === null) {
     gaps.push({ level: "info", text: "No account-wide daily cap. Each agent is limited only by its own budget.", action: { label: "Set a cap", path: "/app/payments" } });
   }
@@ -247,6 +255,9 @@ function AccountDetails({ data, busy, exec }: { data: MapData; busy: boolean; ex
               ["Reserved in flight", near(p.reserved_total)],
               ["Safety buffer", near(p.safety_buffer)],
               ["Policy revision", p.revision.toString()],
+              ...(p.blocked !== undefined
+                ? ([["Blocked recipients", String(data.blocked.length)], ["Guardians", String(data.guardians.length)]] as [string, ReactNode][])
+                : []),
               ["Trusted registry", <ExplorerLink url={explorerContract(p.registry)}>{p.registry}</ExplorerLink>],
             ]}
           />
@@ -343,6 +354,7 @@ function AgentDetails({ agent, data, busy, exec, onConnect }: { agent: AgentView
   // Effective rules, as the registry and the policy apply them.
   const blocks: string[] = [];
   let effective: { recipient: string; perPayment: bigint; daily: bigint }[] = [];
+  let blockedApproved: string[] = [];
   let capability: bigint | null = null;
   if (d) {
     for (const e of d.entries) {
@@ -369,7 +381,10 @@ function AgentDetails({ agent, data, busy, exec, onConnect }: { agent: AgentView
     }
     if (governing.length > 0) {
       const sets = governing.map((e) => e.mandate!.recipients);
-      const names = Object.keys(sets[0]!).filter((r) => sets.every((s) => r in s));
+      const approvedEverywhere = Object.keys(sets[0]!).filter((r) => sets.every((s) => r in s));
+      const blockedSet = new Set(data.blocked.map((b) => b.recipient));
+      blockedApproved = approvedEverywhere.filter((r) => blockedSet.has(r));
+      const names = approvedEverywhere.filter((r) => !blockedSet.has(r));
       effective = names.map((r) => {
         const rules = sets.map((s) => s[r]!);
         const perPayment = minBig([...rules.map((x) => x.per_payment_cap), ...(capability !== null ? [capability] : [])])!;
@@ -388,6 +403,13 @@ function AgentDetails({ agent, data, busy, exec, onConnect }: { agent: AgentView
       gaps.push({ level: "block", text: "No approved recipients, so this agent cannot pay anyone.", action: { label: "Approve recipients", path: "/app/payments" } });
     } else if (governing.length > 0 && effective.length === 0) {
       gaps.push({ level: "block", text: "No recipient is approved by every approval on its path, so it cannot pay anyone." });
+    }
+    if (blockedApproved.length > 0) {
+      gaps.push({
+        level: "warn",
+        text: `Approved but blocked, so refused for every agent: ${blockedApproved.join(", ")}.`,
+        action: { label: "Review blocklist", path: "/app/payments" },
+      });
     }
     if (agent.expires_at === null) gaps.push({ level: "info", text: "Never expires. An expiry can only be set at registration." });
     if ((agent.locks & LOCKS.NO_TRANSFER) === 0) gaps.push({ level: "info", text: "Transferable. A transfer voids your approvals for it.", action: { label: "Lock in Agents", path: "/app/agents" } });

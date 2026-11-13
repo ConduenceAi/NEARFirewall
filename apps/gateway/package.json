@@ -1,0 +1,14 @@
+{
+  "name": "@nearfirewall/gateway",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Self-hosted gateway that lets cloud AI platforms (remote MCP or HTTP) pay within the owner's on-chain rules",
+  "bin": { "nearfirewall-gateway": "./src/main.ts" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@nearfirewall/mcp": "0.1.0",
+    "@nearfirewall/sdk": "0.1.0",
+    "near-api-js": "^7.5.3",
+    "zod": "^4.6.7"
+  }
+}

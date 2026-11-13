@@ -7,7 +7,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { Bot, CircleSlash, Eye, EyeOff, KeyRound, Lock, PauseCircle, RefreshCw, ShieldCheck, Snowflake, UserRound, Wallet } from "lucide-react";
-import { LOCKS, type AgentView, type Connection, type Mandate, type PolicyState, type PolicyView, type UsageView } from "@nearfirewall/sdk";
+import { LOCKS, type AgentView, type BlockedRecipient, type Connection, type Guardian, type Mandate, type PolicyState, type PolicyView, type UsageView } from "@nearfirewall/sdk";
 import { policyOf } from "../config.ts";
 import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { near } from "../format.ts";
@@ -26,6 +26,9 @@ export interface MapData {
   mandates: Map<string, Mandate>;
   usage: Map<string, UsageView>;
   connections: Connection[];
+  /** Recipients no agent may pay, whatever the approvals say. */
+  blocked: BlockedRecipient[];
+  guardians: Guardian[];
 }
 
 async function loadMap(account: string, { registry, policyCodeHash }: ReturnType<typeof useWorkspaceRegistry>): Promise<MapData> {
@@ -36,10 +39,13 @@ async function loadMap(account: string, { registry, policyCodeHash }: ReturnType
   const usage = new Map<string, UsageView>();
   let view: PolicyView | null = null;
   let connections: Connection[] = [];
+  let blocked: BlockedRecipient[] = [];
+  let guardians: Guardian[] = [];
   if (state.kind === "enabled") {
     view = await policy.getPolicy();
     if (view.registry !== registry.registryId) throw new Error(`Your payment policy trusts ${view.registry}. Select that registry before managing its agents.`);
     if (view.connections !== undefined) connections = await policy.getConnections();
+    if (view.blocked !== undefined) [blocked, guardians] = await Promise.all([policy.getBlocklist(), policy.getGuardians()]);
     await Promise.all(
       agents.map(async (a) => {
         const m = await policy.getMandate(a.agent_id);
@@ -49,7 +55,7 @@ async function loadMap(account: string, { registry, policyCodeHash }: ReturnType
       }),
     );
   }
-  return { account, registryId: registry.registryId, state, policy: view, agents, mandates, usage, connections };
+  return { account, registryId: registry.registryId, state, policy: view, agents, mandates, usage, connections, blocked, guardians };
 }
 
 // ------------------------------------------------------------------ layout

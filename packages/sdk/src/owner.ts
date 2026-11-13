@@ -283,6 +283,60 @@ export function createRegistry(
   };
 }
 
+// ------------------------------------------------------------------ blocklist and guardians
+
+/** Blocks a recipient for every agent, whatever the approvals say. */
+export const blockRecipient = (payerId: string, recipient: string, reason?: string) =>
+  oneYoctoCall(payerId, "block_recipient", { recipient, reason: reason ?? null });
+
+/** Removes a recipient from the blocklist. Only the owner can do this. */
+export const unblockRecipient = (payerId: string, recipient: string) =>
+  oneYoctoCall(payerId, "unblock_recipient", { recipient });
+
+/** Default gas allowance for a guardian key. It only pays fees for `guardian_block`. */
+export const GUARDIAN_ALLOWANCE = parseNear("0.1");
+
+export interface GuardianInput {
+  /** The watcher's new public key, `ed25519:…`. Generate it fresh. */
+  publicKey: string;
+  label: string;
+  allowance?: bigint;
+}
+
+/**
+ * Adds a guardian key to the owner's own account in one transaction. The key can
+ * call only `guardian_block`, so it can add recipients to the blocklist and do
+ * nothing else: it cannot unblock, approve, raise a limit, or pay.
+ */
+export function addGuardianKey(ownerId: string, input: GuardianInput): WalletTransaction {
+  if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(input.publicKey)) throw new Error("Expected an ed25519 public key");
+  const allowance = input.allowance ?? GUARDIAN_ALLOWANCE;
+  if (allowance <= 0n) throw new Error("The allowance must be above zero");
+  return {
+    receiverId: ownerId,
+    actions: [
+      {
+        type: "AddKey",
+        params: {
+          publicKey: input.publicKey,
+          accessKey: { permission: { receiverId: ownerId, allowance: allowance.toString(), methodNames: ["guardian_block"] } },
+        },
+      },
+      call("add_guardian_key", { public_key: input.publicKey, label: input.label }, ONE_YOCTO),
+    ],
+  };
+}
+
+/** Removes a guardian and deletes its key, unless the key is already gone. */
+export function removeGuardianKey(ownerId: string, publicKey: string, opts: { keyPresent: boolean } = { keyPresent: true }): WalletTransaction {
+  const actions: WalletAction[] = [call("remove_guardian_key", { public_key: publicKey }, ONE_YOCTO)];
+  if (opts.keyPresent) actions.push({ type: "DeleteKey", params: { publicKey } });
+  return { receiverId: ownerId, actions };
+}
+
+/** Arguments a guardian signs for `guardian_block`. It is called with no deposit, by the guardian's own key. */
+export const guardianBlockArgs = (recipient: string, reason?: string) => ({ recipient, reason: reason ?? null });
+
 // ------------------------------------------------------------------ connections
 
 /** Default gas allowance for a connection key: it only pays network fees. */

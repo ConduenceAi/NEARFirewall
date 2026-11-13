@@ -5,5 +5,6 @@ export * from "./clients.ts";
 export * from "./owner.ts";
 export * from "./executor.ts";
 export * from "./connection.ts";
+export * from "./access.ts";
 export * from "./reasons.ts";
 export * from "./manifest.ts";

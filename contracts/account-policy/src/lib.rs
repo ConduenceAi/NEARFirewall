@@ -54,6 +54,14 @@ pub const MAX_PENDING_PER_AGENT: usize = 5;
 pub const CONFIRM_WINDOW_NS: u64 = DAY_NS;
 /// How many overdue confirmations each execution expires.
 pub const EXPIRE_PER_CALL: usize = 3;
+/// Blocklist limits. Guardians may add at most `MAX_GUARDIAN_BLOCKS` of the entries,
+/// so a compromised guardian can never fill the list and lock the owner out of it.
+pub const MAX_BLOCKED: usize = 100;
+pub const MAX_GUARDIAN_BLOCKS: usize = 50;
+pub const MAX_GUARDIANS: usize = 5;
+pub const MAX_REASON_BYTES: usize = 120;
+/// The only method a guardian key may call on this account.
+pub const GUARDIAN_METHOD: &str = "guardian_block";
 
 const GAS_FOR_SETTLE: Gas = Gas::from_tgas(10);
 const GAS_FOR_AUTHORIZE: Gas = Gas::from_tgas(15);
@@ -71,6 +79,8 @@ enum StorageKey {
     Activity,
     Connections,
     Pending,
+    Blocked,
+    Guardians,
 }
 
 #[ext_contract(ext_registry)]
@@ -259,6 +269,8 @@ pub struct PolicyView {
     pub day: u64,
     pub connections: u32,
     pub pending: u32,
+    pub blocked: u32,
+    pub guardians: u32,
 }
 
 #[near(serializers = [json])]
@@ -324,6 +336,18 @@ pub enum PolicyEvent {
         label: String,
     },
     #[event_version("1.0.0")]
+    RecipientBlocked {
+        recipient: AccountId,
+        by: String,
+        revision: u64,
+    },
+    #[event_version("1.0.0")]
+    RecipientUnblocked { recipient: AccountId, revision: u64 },
+    #[event_version("1.0.0")]
+    GuardianAdded { public_key: String, label: String },
+    #[event_version("1.0.0")]
+    GuardianRemoved { public_key: String },
+    #[event_version("1.0.0")]
     ConnectionRemoved {
         agent_id: AgentId,
         public_key: String,
@@ -386,6 +410,42 @@ pub struct AccountPolicy {
     pending: LookupMap<String, PendingConfirmation>,
     /// Keys of every pending confirmation (at most `MAX_PENDING`).
     pending_keys: Vec<String>,
+    /// Accounts no agent may pay, whatever the approvals say.
+    blocked: LookupMap<AccountId, BlockedRecipient>,
+    blocked_index: Vec<AccountId>,
+    /// Keys that can only call `guardian_block`.
+    guardians: LookupMap<String, Guardian>,
+    guardian_index: Vec<String>,
+}
+
+/// An account on the blocklist.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug)]
+pub struct BlockedRecipient {
+    pub recipient: AccountId,
+    pub at: u64,
+    /// `owner`, or `guardian:<label>`.
+    pub by: String,
+    pub reason: Option<String>,
+}
+
+/// A watcher key that can add recipients to the blocklist, and do nothing else.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug)]
+pub struct Guardian {
+    pub label: String,
+    pub created_at: u64,
+    pub last_used: Option<u64>,
+    pub blocks: u64,
+}
+
+#[near(serializers = [json])]
+pub struct GuardianView {
+    pub public_key: String,
+    pub label: String,
+    pub created_at: u64,
+    pub last_used: Option<u64>,
+    pub blocks: u64,
 }
 
 pub(crate) fn request_key(leaf: &str, request_id: &str) -> String {
@@ -476,6 +536,10 @@ impl AccountPolicy {
             connection_index: Vec::new(),
             pending: LookupMap::new(StorageKey::Pending),
             pending_keys: Vec::new(),
+            blocked: LookupMap::new(StorageKey::Blocked),
+            blocked_index: Vec::new(),
+            guardians: LookupMap::new(StorageKey::Guardians),
+            guardian_index: Vec::new(),
         }
     }
 
@@ -718,6 +782,10 @@ impl AccountPolicy {
             "This key is already connected"
         );
         require!(
+            !self.guardians.contains_key(&key),
+            "This key is a guardian key"
+        );
+        require!(
             self.connection_index.len() < MAX_CONNECTIONS,
             "Too many connections on this account"
         );
@@ -771,6 +839,186 @@ impl AccountPolicy {
             public_key: key,
         }
         .emit();
+    }
+
+    // ---------------------------------------------------------------- blocklist
+
+    /// Blocks `recipient` for every agent, whatever the approvals say. Takes
+    /// effect for the next request.
+    #[payable]
+    pub fn block_recipient(&mut self, recipient: AccountId, reason: Option<String>) {
+        self.assert_owner();
+        require!(
+            recipient != env::current_account_id(),
+            "The account cannot block itself"
+        );
+        if let Some(reason) = &reason {
+            validate_text(reason, MAX_REASON_BYTES, "The reason");
+        }
+        if !self.blocked.contains_key(&recipient) {
+            require!(
+                self.blocked_index.len() < MAX_BLOCKED,
+                "The blocklist is full"
+            );
+            self.blocked_index.push(recipient.clone());
+        }
+        self.blocked.insert(
+            recipient.clone(),
+            BlockedRecipient {
+                recipient: recipient.clone(),
+                at: env::block_timestamp(),
+                by: "owner".to_string(),
+                reason,
+            },
+        );
+        let revision = self.bump_revision();
+        PolicyEvent::RecipientBlocked {
+            recipient,
+            by: "owner".to_string(),
+            revision,
+        }
+        .emit();
+    }
+
+    /// Removes a recipient from the blocklist. Only the owner can do this.
+    #[payable]
+    pub fn unblock_recipient(&mut self, recipient: AccountId) {
+        self.assert_owner();
+        require!(
+            self.blocked.remove(&recipient).is_some(),
+            "This recipient is not blocked"
+        );
+        self.blocked_index.retain(|r| r != &recipient);
+        let revision = self.bump_revision();
+        PolicyEvent::RecipientUnblocked {
+            recipient,
+            revision,
+        }
+        .emit();
+    }
+
+    /// Records a guardian: a watcher key that can only add recipients to the
+    /// blocklist. The app adds the key itself (a function-call key on this
+    /// account, limited to `guardian_block`) in the same transaction.
+    #[payable]
+    pub fn add_guardian_key(&mut self, public_key: PublicKey, label: String) {
+        self.assert_owner();
+        validate_text(&label, MAX_LABEL_BYTES, "The label");
+        let key = String::from(&public_key);
+        require!(
+            !self.guardians.contains_key(&key),
+            "This key is already a guardian"
+        );
+        require!(
+            !self.connections.contains_key(&key),
+            "This key is a connected agent key"
+        );
+        require!(
+            self.guardian_index.len() < MAX_GUARDIANS,
+            "Too many guardians"
+        );
+        self.guardians.insert(
+            key.clone(),
+            Guardian {
+                label: label.clone(),
+                created_at: env::block_timestamp(),
+                last_used: None,
+                blocks: 0,
+            },
+        );
+        self.guardian_index.push(key.clone());
+        PolicyEvent::GuardianAdded {
+            public_key: key,
+            label,
+        }
+        .emit();
+    }
+
+    /// Removes a guardian. The app deletes the key in the same transaction.
+    /// Entries the guardian added stay until the owner removes them.
+    #[payable]
+    pub fn remove_guardian_key(&mut self, public_key: PublicKey) {
+        self.assert_owner();
+        let key = String::from(&public_key);
+        require!(
+            self.guardians.remove(&key).is_some(),
+            "This key is not a guardian"
+        );
+        self.guardian_index.retain(|k| k != &key);
+        PolicyEvent::GuardianRemoved { public_key: key }.emit();
+    }
+
+    /// Guardian only: adds `recipient` to the blocklist. A guardian can never
+    /// unblock, approve, or raise a limit, cannot overwrite the owner's entries,
+    /// and may add at most `MAX_GUARDIAN_BLOCKS` entries. Returns whether the
+    /// recipient was newly blocked.
+    pub fn guardian_block(&mut self, recipient: AccountId, reason: Option<String>) -> bool {
+        let me = env::current_account_id();
+        require!(
+            env::predecessor_account_id() == me && env::signer_account_id() == me,
+            "Only a guardian key on this account can call this"
+        );
+        require!(
+            env::attached_deposit().is_zero(),
+            "A guardian cannot attach a deposit"
+        );
+        let key = String::from(&env::signer_account_pk());
+        let label = self
+            .guardians
+            .get(&key)
+            .map(|g| g.label.clone())
+            .unwrap_or_else(|| env::panic_str("This key is not a guardian"));
+        require!(recipient != me, "The account cannot block itself");
+        let reason = reason.map(|r| {
+            r.chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_REASON_BYTES)
+                .collect::<String>()
+        });
+        if self.blocked.contains_key(&recipient) {
+            return false;
+        }
+        let by_guardians = self
+            .blocked_index
+            .iter()
+            .filter(|r| {
+                self.blocked
+                    .get(*r)
+                    .map(|b| b.by.starts_with("guardian:"))
+                    .unwrap_or(false)
+            })
+            .count();
+        require!(
+            by_guardians < MAX_GUARDIAN_BLOCKS,
+            "Guardians have reached their limit. The owner must review the blocklist."
+        );
+        require!(
+            self.blocked_index.len() < MAX_BLOCKED,
+            "The blocklist is full"
+        );
+        let by = format!("guardian:{label}");
+        self.blocked_index.push(recipient.clone());
+        self.blocked.insert(
+            recipient.clone(),
+            BlockedRecipient {
+                recipient: recipient.clone(),
+                at: env::block_timestamp(),
+                by: by.clone(),
+                reason,
+            },
+        );
+        if let Some(guardian) = self.guardians.get_mut(&key) {
+            guardian.blocks += 1;
+            guardian.last_used = Some(env::block_timestamp());
+        }
+        let revision = self.bump_revision();
+        PolicyEvent::RecipientBlocked {
+            recipient,
+            by,
+            revision,
+        }
+        .emit();
+        true
     }
 
     // ---------------------------------------------------------------- execution
@@ -1092,7 +1340,35 @@ impl AccountPolicy {
             day: today,
             connections: self.connection_index.len() as u32,
             pending: self.pending_keys.len() as u32,
+            blocked: self.blocked_index.len() as u32,
+            guardians: self.guardian_index.len() as u32,
         }
+    }
+
+    /// Every blocked recipient, newest last.
+    pub fn get_blocklist(&self) -> Vec<BlockedRecipient> {
+        self.blocked_index
+            .iter()
+            .filter_map(|r| self.blocked.get(r).cloned())
+            .collect()
+    }
+
+    pub fn is_blocked(&self, recipient: AccountId) -> bool {
+        self.blocked.contains_key(&recipient)
+    }
+
+    pub fn get_guardians(&self) -> Vec<GuardianView> {
+        self.guardian_index
+            .iter()
+            .filter_map(|k| self.guardians.get(k).map(|g| (k, g)))
+            .map(|(k, g)| GuardianView {
+                public_key: k.clone(),
+                label: g.label.clone(),
+                created_at: g.created_at,
+                last_used: g.last_used,
+                blocks: g.blocks,
+            })
+            .collect()
     }
 
     pub fn get_revision(&self) -> u64 {
@@ -1351,6 +1627,10 @@ impl AccountPolicy {
         let amount = action.amount();
         if amount == 0 {
             return Err(Reason::InvalidRequest);
+        }
+        // The blocklist wins over every approval.
+        if self.blocked.contains_key(recipient) {
+            return Err(Reason::RecipientBlocked);
         }
 
         let mut applied = Vec::new();
@@ -1621,6 +1901,9 @@ impl AccountPolicy {
     fn recheck(&self, pending: &PendingConfirmation, path: &[PathNode]) -> Result<(), Reason> {
         if self.paused {
             return Err(Reason::PaymentsPaused);
+        }
+        if self.blocked.contains_key(&pending.recipient) {
+            return Err(Reason::RecipientBlocked);
         }
         let now = env::block_timestamp();
         for agent_id in &pending.mandates {

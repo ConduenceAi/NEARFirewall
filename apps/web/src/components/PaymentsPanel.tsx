@@ -27,6 +27,7 @@ import { ensureOk, near, timeText } from "../format.ts";
 import { useAction, useAsync } from "../hooks.ts";
 import { useWallet } from "../wallet.tsx";
 import { VendorsWizard } from "./VendorsWizard.tsx";
+import { Safeguards } from "./Safeguards.tsx";
 
 type Execute = (label: string, tx: WalletTransaction | (() => WalletTransaction | Promise<WalletTransaction>), handle?: (value: unknown) => void) => Promise<boolean>;
 
@@ -153,6 +154,7 @@ function Policy({ policy, busy, exec, onPendingChanged }: { policy: PolicyClient
         </div>
       )}
       {v?.pending !== undefined && <PendingPayments policy={policy} agents={agents.data ?? []} paused={v.paused} revision={Number(v.revision)} busy={busy} exec={exec} onPendingChanged={onPendingChanged} />}
+      {v?.blocked !== undefined && <Safeguards policy={policy} busy={busy} exec={exec} />}
       {agents.error && <p className="notice error">{agents.error}</p>}
       <h3>Approved agents</h3>
       {(agents.data ?? []).map((agent) => (
