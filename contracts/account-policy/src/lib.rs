@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use near_sdk::borsh::{BorshDeserialize, BorshSerialize};
-use near_sdk::json_types::U128;
+use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::serde_json::json;
 use near_sdk::store::LookupMap;
 use near_sdk::{
@@ -39,8 +39,8 @@ use near_sdk::{
     IntoStorageKey, NearToken, PanicOnDefault, Promise, PromiseError, PromiseOrValue, PublicKey,
 };
 use nearfirewall_types::{
-    day_index, is_valid_request_id, Action, AgentId, Authorization, ExecContext, Outcome, PathNode,
-    Reason, DAY_NS, MAX_DEPTH,
+    day_index, is_valid_request_id, is_valid_site, Action, AgentId, AgentRef, Authorization,
+    ExecContext, Outcome, PathNode, Reason, DAY_NS, MAX_DEPTH,
 };
 
 /// Maximum recipients one mandate can approve.
@@ -85,6 +85,13 @@ const GAS_FOR_ON_AUTHORIZED_X402: Gas = Gas::from_tgas(75);
 const GAS_FOR_FT_TRANSFER: Gas = Gas::from_tgas(20);
 const GAS_FOR_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
 pub const MIN_X402_EXECUTE_GAS: Gas = Gas::from_tgas(125);
+/// Paying an approved agent adds a check of the seller's registry first.
+const GAS_FOR_ON_AUTHORIZED_X402_AGENT: Gas = Gas::from_tgas(95);
+const GAS_FOR_GET_AGENT: Gas = Gas::from_tgas(5);
+const GAS_FOR_ON_PAYEE: Gas = Gas::from_tgas(50);
+pub const MIN_X402_AGENT_EXECUTE_GAS: Gas = Gas::from_tgas(145);
+/// Gas left for the new code's check after `upgrade_code` deploys it.
+const GAS_FOR_UPGRADE_CHECK: Gas = Gas::from_tgas(10);
 /// NEAR sent to a new x402 payment account, which creates it: 0.01 NEAR. The
 /// agent's key controls this account, so this is all it can ever take from it.
 pub const X402_ACCOUNT_FUNDING: u128 = 10_000_000_000_000_000_000_000;
@@ -147,6 +154,28 @@ pub trait AgentRegistry {
         -> Authorization;
 }
 
+/// A seller's registry, read to check that the account being paid holds the
+/// agent the seller claims to be.
+#[ext_contract(ext_payee_registry)]
+pub trait PayeeRegistry {
+    fn get_agent(&self, agent_id: AgentId) -> Option<PayeeAgentView>;
+}
+
+/// The parts of a registry's `AgentView` the payee check reads.
+#[near(serializers = [json])]
+#[derive(Clone, Debug)]
+pub struct PayeeAgentView {
+    pub holder: Option<AccountId>,
+    pub status: PayeeAgentStatus,
+    pub generation: U64,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Debug)]
+pub struct PayeeAgentStatus {
+    pub state: String,
+}
+
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecipientRule {
@@ -202,6 +231,10 @@ pub enum UsageKey {
     X402Unlisted(AgentId),
     X402Mandate(AgentId),
     X402Account,
+    /// Per approved website (host), per mandate.
+    X402Site(AgentId, String),
+    /// Per approved agent (`<agent_id>@<registry>`), per mandate.
+    X402Payee(AgentId, String),
 }
 
 #[near(serializers = [borsh])]
@@ -238,6 +271,10 @@ pub enum Via {
         public_key: String,
         label: String,
         payment_account: AccountId,
+        /// The website that asked for payment, as the client reported it.
+        site: Option<String>,
+        /// The agent the seller claimed to be (`<agent_id>@<registry>`).
+        payee_agent: Option<String>,
     },
 }
 
@@ -259,18 +296,49 @@ pub struct X402Limit {
     pub daily_cap: U128,
 }
 
+/// An approved website. If `pay_to` is set, the site may only ask to be paid
+/// there; otherwise the policy relies on the client to report the site.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct X402SiteRule {
+    pub per_payment_cap: U128,
+    pub daily_cap: U128,
+    pub pay_to: Option<AccountId>,
+}
+
+/// An approved agent in another registry. A payment matches only if the account
+/// paid holds the agent when the policy checks the registry. If `generation`
+/// is set, the agent must not have changed hands since the owner approved it.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct X402AgentRule {
+    pub registry: AccountId,
+    pub agent_id: AgentId,
+    pub per_payment_cap: U128,
+    pub daily_cap: U128,
+    pub generation: Option<u64>,
+}
+
 /// The x402 limits on one mandate. Like the mandate itself, they apply to the
 /// mandate's whole branch, and a payment must fit every mandate on its path.
+///
+/// A payment uses the first rule that matches: an approved agent the seller
+/// proves it holds, then an approved seller account, then an approved website,
+/// then the unlisted pool.
 #[near(serializers = [borsh, json])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct X402Rules {
     /// Shared daily pool for x402 payments by the branch.
     pub daily_cap: U128,
-    /// Sellers the owner approved, each with its own limits.
+    /// Seller accounts the owner approved, each with its own limits.
     pub sellers: BTreeMap<AccountId, X402Limit>,
-    /// Limits for any seller that is not listed: a per-payment cap and one daily
-    /// pool shared by all of them. `None` refuses sellers that are not listed.
+    /// Limits for any seller that matches nothing else: a per-payment cap and one
+    /// daily pool shared by all of them. `None` refuses them.
     pub unlisted: Option<X402Limit>,
+    /// Websites the owner approved, by host.
+    pub sites: BTreeMap<String, X402SiteRule>,
+    /// Agents the owner approved, by `<agent_id>@<registry>`.
+    pub agents: BTreeMap<String, X402AgentRule>,
 }
 
 #[near(serializers = [json])]
@@ -282,20 +350,61 @@ pub struct X402SellerInput {
 }
 
 #[near(serializers = [json])]
+#[derive(Clone, Debug)]
+pub struct X402SiteInput {
+    pub site: String,
+    pub per_payment_cap: U128,
+    pub daily_cap: U128,
+    #[serde(default)]
+    pub pay_to: Option<AccountId>,
+}
+
+#[near(serializers = [json])]
+#[derive(Clone, Debug)]
+pub struct X402AgentInput {
+    pub registry: AccountId,
+    pub agent_id: AgentId,
+    pub per_payment_cap: U128,
+    pub daily_cap: U128,
+    #[serde(default)]
+    pub generation: Option<u64>,
+}
+
+#[near(serializers = [json])]
 pub struct X402UsageView {
     pub day: u64,
     pub mandate_used_today: U128,
     pub seller_used_today: Option<U128>,
     pub unlisted_used_today: U128,
     pub account_used_today: U128,
+    pub site_used_today: Option<U128>,
+    pub payee_used_today: Option<U128>,
 }
 
-/// Which mandates an x402 request charged to their unlisted pool, so a failed
-/// funding releases exactly what it reserved. Removed once the request settles.
+/// Which rule an x402 payment used on one mandate.
 #[near(serializers = [borsh])]
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PayeeMatch {
+    Account,
+    Unlisted,
+    Site(String),
+    Agent(String),
+}
+
+/// What an x402 request reserved, so a failure releases exactly that, and the
+/// token to fund it with. Removed once the request finishes.
+#[near(serializers = [borsh])]
+#[derive(Clone, Debug)]
 struct X402Charge {
-    unlisted: Vec<AgentId>,
+    asset: AccountId,
+    matches: Vec<(AgentId, PayeeMatch)>,
+}
+
+/// The result of an x402 check: the rule used on each mandate, and the agent
+/// claim to verify against the seller's registry, if a rule relies on it.
+struct X402Check {
+    matches: Vec<(AgentId, PayeeMatch)>,
+    verify: Option<(AgentRef, Vec<u64>)>,
 }
 
 #[near(serializers = [borsh, json])]
@@ -541,6 +650,32 @@ pub enum PolicyEvent {
         public_key: String,
         payment_account: AccountId,
     },
+    #[event_version("1.0.0")]
+    X402SiteApproved {
+        agent_id: AgentId,
+        site: String,
+        revision: u64,
+    },
+    #[event_version("1.0.0")]
+    X402SiteRemoved {
+        agent_id: AgentId,
+        site: String,
+        revision: u64,
+    },
+    #[event_version("1.0.0")]
+    X402AgentApproved {
+        agent_id: AgentId,
+        payee: String,
+        revision: u64,
+    },
+    #[event_version("1.0.0")]
+    X402AgentRemoved {
+        agent_id: AgentId,
+        payee: String,
+        revision: u64,
+    },
+    #[event_version("1.0.0")]
+    CodeUpgradeRequested { code_hash: String },
 }
 
 #[near(contract_state)]
@@ -659,6 +794,62 @@ fn validate_x402_limit(limit: &X402Limit, what: &str) {
     );
 }
 
+fn site_rule(input: X402SiteInput, owner: &AccountId) -> (String, X402SiteRule) {
+    require!(
+        is_valid_site(&input.site),
+        format!(
+            "{} is not a website host such as api.example.com",
+            input.site
+        )
+    );
+    let limit = X402Limit {
+        per_payment_cap: input.per_payment_cap,
+        daily_cap: input.daily_cap,
+    };
+    validate_x402_limit(&limit, &input.site);
+    require!(
+        input.pay_to.as_ref() != Some(owner),
+        "The payer cannot be a website's payee"
+    );
+    (
+        input.site,
+        X402SiteRule {
+            per_payment_cap: input.per_payment_cap,
+            daily_cap: input.daily_cap,
+            pay_to: input.pay_to,
+        },
+    )
+}
+
+fn agent_rule(input: X402AgentInput) -> (String, X402AgentRule) {
+    require!(
+        !input.agent_id.is_empty()
+            && input.agent_id.len() <= 20
+            && input.agent_id.bytes().all(|b| b.is_ascii_digit()),
+        "An agent ID is a token ID such as 7"
+    );
+    let limit = X402Limit {
+        per_payment_cap: input.per_payment_cap,
+        daily_cap: input.daily_cap,
+    };
+    let key = AgentRef {
+        registry: input.registry.clone(),
+        agent_id: input.agent_id.clone(),
+    }
+    .key();
+    validate_x402_limit(&limit, &key);
+    (
+        key,
+        X402AgentRule {
+            registry: input.registry,
+            agent_id: input.agent_id,
+            per_payment_cap: input.per_payment_cap,
+            daily_cap: input.daily_cap,
+            generation: input.generation,
+        },
+    )
+}
+
 fn validate_text(value: &str, max: usize, what: &str) {
     require!(
         !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control),
@@ -678,21 +869,69 @@ fn clean_client(client: Option<String>) -> Option<String> {
         .filter(|c| !c.is_empty())
 }
 
+/// The usage counters one mandate's x402 charge touches, besides the account-wide one.
+fn x402_usage_keys(agent_id: &AgentId, matched: &PayeeMatch, pay_to: &AccountId) -> Vec<UsageKey> {
+    let mut keys = vec![
+        UsageKey::X402Mandate(agent_id.clone()),
+        UsageKey::X402Seller(agent_id.clone(), pay_to.clone()),
+    ];
+    match matched {
+        PayeeMatch::Account => {}
+        PayeeMatch::Unlisted => keys.push(UsageKey::X402Unlisted(agent_id.clone())),
+        PayeeMatch::Site(site) => keys.push(UsageKey::X402Site(agent_id.clone(), site.clone())),
+        PayeeMatch::Agent(payee) => keys.push(UsageKey::X402Payee(agent_id.clone(), payee.clone())),
+    }
+    keys
+}
+
+/// Moves exactly `amount` of the x402 token from this account to the payment
+/// account, then settles the request.
+fn fund_x402(
+    asset: AccountId,
+    payment_account: AccountId,
+    pay_to: &AccountId,
+    amount: u128,
+    key: String,
+) -> Promise {
+    Promise::new(asset)
+        .function_call(
+            "ft_transfer".to_string(),
+            json!({
+                "receiver_id": payment_account,
+                "amount": U128(amount),
+                "memo": format!("x402 {pay_to}"),
+            })
+            .to_string()
+            .into_bytes(),
+            NearToken::from_yoctonear(1),
+            GAS_FOR_FT_TRANSFER,
+        )
+        .then(
+            AccountPolicy::ext(env::current_account_id())
+                .with_static_gas(GAS_FOR_SETTLE)
+                .on_settle(key),
+        )
+}
+
 /// How a connection request is recorded: x402 requests carry their payment
 /// account, so their amounts are never mistaken for NEAR.
 fn connection_via(action: &Action, public_key: String, label: String) -> Via {
-    let payment_account = if action.is_x402() {
-        PublicKey::from_str(&public_key)
-            .ok()
-            .and_then(|k| x402_account(&k))
-    } else {
-        None
+    let Action::X402Pay {
+        site, payee_agent, ..
+    } = action
+    else {
+        return Via::Connection { public_key, label };
     };
-    match payment_account {
+    match PublicKey::from_str(&public_key)
+        .ok()
+        .and_then(|k| x402_account(&k))
+    {
         Some(payment_account) => Via::X402 {
             public_key,
             label,
             payment_account,
+            site: site.clone(),
+            payee_agent: payee_agent.as_ref().map(AgentRef::key),
         },
         None => Via::Connection { public_key, label },
     }
@@ -973,6 +1212,29 @@ impl AccountPolicy {
         self.assert_owner();
         self.safety_buffer = amount.0;
         self.bump_revision();
+    }
+
+    /// Replaces this policy's code, from an ordinary owner call (1 yoctoNEAR, so
+    /// only the account's full-access keys). Wallets that refuse a direct
+    /// deployment can sign this. The deploy and a call to `get_revision` run as
+    /// one batch, so code that cannot read the existing state is rolled back.
+    #[payable]
+    pub fn upgrade_code(&mut self, code: Base64VecU8) -> Promise {
+        self.assert_owner();
+        require!(!code.0.is_empty(), "The code is empty");
+        let code_hash: String = env::sha256(&code.0)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        PolicyEvent::CodeUpgradeRequested { code_hash }.emit();
+        Promise::new(env::current_account_id())
+            .deploy_contract(code.0)
+            .function_call(
+                "get_revision".to_string(),
+                b"{}".to_vec(),
+                NearToken::from_yoctonear(0),
+                GAS_FOR_UPGRADE_CHECK,
+            )
     }
 
     // ---------------------------------------------------------------- connections
@@ -1282,6 +1544,8 @@ impl AccountPolicy {
         daily_cap: U128,
         sellers: Vec<X402SellerInput>,
         unlisted: Option<X402Limit>,
+        sites: Option<Vec<X402SiteInput>>,
+        agents: Option<Vec<X402AgentInput>>,
     ) {
         self.assert_owner();
         self.editable_mandate(&agent_id);
@@ -1291,6 +1555,20 @@ impl AccountPolicy {
         );
         require!(sellers.len() <= MAX_RECIPIENTS, "Too many sellers");
         let owner = env::current_account_id();
+        let sites = sites.unwrap_or_default();
+        let agents = agents.unwrap_or_default();
+        require!(sites.len() <= MAX_RECIPIENTS, "Too many websites");
+        require!(agents.len() <= MAX_RECIPIENTS, "Too many agents");
+        let mut site_rules = BTreeMap::new();
+        for input in sites {
+            let (site, rule) = site_rule(input, &owner);
+            require!(site_rules.insert(site, rule).is_none(), "Duplicate website");
+        }
+        let mut agent_rules = BTreeMap::new();
+        for input in agents {
+            let (key, rule) = agent_rule(input);
+            require!(agent_rules.insert(key, rule).is_none(), "Duplicate agent");
+        }
         let mut approved = BTreeMap::new();
         for s in sellers {
             require!(
@@ -1316,10 +1594,132 @@ impl AccountPolicy {
                 daily_cap,
                 sellers: approved,
                 unlisted,
+                sites: site_rules,
+                agents: agent_rules,
             },
         );
         let revision = self.bump_revision();
         PolicyEvent::X402RulesSet { agent_id, revision }.emit();
+    }
+
+    /// Adds or replaces one approved website in an agent's x402 rules. With
+    /// `pay_to`, the site may only ask to be paid at that account.
+    #[payable]
+    pub fn approve_x402_site(
+        &mut self,
+        agent_id: AgentId,
+        site: String,
+        per_payment_cap: U128,
+        daily_cap: U128,
+        pay_to: Option<AccountId>,
+    ) {
+        self.assert_owner();
+        self.editable_mandate(&agent_id);
+        let (site, rule) = site_rule(
+            X402SiteInput {
+                site,
+                per_payment_cap,
+                daily_cap,
+                pay_to,
+            },
+            &env::current_account_id(),
+        );
+        let mut rules = self
+            .x402_rules(&agent_id)
+            .unwrap_or_else(|| env::panic_str("Set this agent's x402 rules first"));
+        if !rules.sites.contains_key(&site) {
+            require!(rules.sites.len() < MAX_RECIPIENTS, "Too many websites");
+        }
+        rules.sites.insert(site.clone(), rule);
+        write_stored(&prefixed_key(StorageKey::X402Rules, &agent_id), &rules);
+        let revision = self.bump_revision();
+        PolicyEvent::X402SiteApproved {
+            agent_id,
+            site,
+            revision,
+        }
+        .emit();
+    }
+
+    #[payable]
+    pub fn remove_x402_site(&mut self, agent_id: AgentId, site: String) {
+        self.assert_owner();
+        self.editable_mandate(&agent_id);
+        let mut rules = self
+            .x402_rules(&agent_id)
+            .unwrap_or_else(|| env::panic_str("This agent has no x402 rules"));
+        require!(
+            rules.sites.remove(&site).is_some(),
+            "This website is not approved"
+        );
+        write_stored(&prefixed_key(StorageKey::X402Rules, &agent_id), &rules);
+        let revision = self.bump_revision();
+        PolicyEvent::X402SiteRemoved {
+            agent_id,
+            site,
+            revision,
+        }
+        .emit();
+    }
+
+    /// Adds or replaces one approved agent (in any registry) in an agent's x402
+    /// rules. Pass the agent's current `generation` so a transfer voids it.
+    #[payable]
+    pub fn approve_x402_agent(
+        &mut self,
+        agent_id: AgentId,
+        registry: AccountId,
+        payee_agent_id: AgentId,
+        per_payment_cap: U128,
+        daily_cap: U128,
+        generation: Option<u64>,
+    ) {
+        self.assert_owner();
+        self.editable_mandate(&agent_id);
+        let (payee, rule) = agent_rule(X402AgentInput {
+            registry,
+            agent_id: payee_agent_id,
+            per_payment_cap,
+            daily_cap,
+            generation,
+        });
+        let mut rules = self
+            .x402_rules(&agent_id)
+            .unwrap_or_else(|| env::panic_str("Set this agent's x402 rules first"));
+        if !rules.agents.contains_key(&payee) {
+            require!(rules.agents.len() < MAX_RECIPIENTS, "Too many agents");
+        }
+        rules.agents.insert(payee.clone(), rule);
+        write_stored(&prefixed_key(StorageKey::X402Rules, &agent_id), &rules);
+        let revision = self.bump_revision();
+        PolicyEvent::X402AgentApproved {
+            agent_id,
+            payee,
+            revision,
+        }
+        .emit();
+    }
+
+    /// Removes one approved agent, by `<agent_id>@<registry>`.
+    #[payable]
+    pub fn remove_x402_agent(&mut self, agent_id: AgentId, payee: String) {
+        self.assert_owner();
+        self.editable_mandate(&agent_id);
+        let mut rules = self
+            .x402_rules(&agent_id)
+            .unwrap_or_else(|| env::panic_str("This agent has no x402 rules"));
+        require!(
+            rules.agents.remove(&payee).is_some(),
+            "This agent is not approved"
+        );
+        write_stored(&prefixed_key(StorageKey::X402Rules, &agent_id), &rules);
+        let revision = self.bump_revision();
+        PolicyEvent::X402AgentRemoved {
+            agent_id,
+            payee,
+            revision,
+        }
+        .emit();
     }
 
     /// Adds or replaces one approved seller in an agent's x402 rules.
@@ -1488,18 +1888,29 @@ impl AccountPolicy {
         if self.requests.contains_key(&key) || self.pending.contains_key(&key) {
             return PromiseOrValue::Value(Outcome::denied(Reason::DuplicateRequest));
         }
-        let callback_gas = if action.is_x402() {
+        if !action.is_well_formed() {
+            return PromiseOrValue::Value(Outcome::denied(Reason::InvalidRequest));
+        }
+        let callback_gas = if let Action::X402Pay { payee_agent, .. } = &action {
             if x402_account(&env::signer_account_pk()).is_none() {
                 return PromiseOrValue::Value(Outcome::denied_with(
                     Reason::InvalidRequest,
                     "x402 payments need an ed25519 connection key",
                 ));
             }
-            require!(
-                env::prepaid_gas() >= MIN_X402_EXECUTE_GAS,
-                "Attach at least 125 Tgas to agent_execute for an x402 payment"
-            );
-            GAS_FOR_ON_AUTHORIZED_X402
+            if payee_agent.is_some() {
+                require!(
+                    env::prepaid_gas() >= MIN_X402_AGENT_EXECUTE_GAS,
+                    "Attach at least 145 Tgas to agent_execute to pay an agent"
+                );
+                GAS_FOR_ON_AUTHORIZED_X402_AGENT
+            } else {
+                require!(
+                    env::prepaid_gas() >= MIN_X402_EXECUTE_GAS,
+                    "Attach at least 125 Tgas to agent_execute for an x402 payment"
+                );
+                GAS_FOR_ON_AUTHORIZED_X402
+            }
         } else {
             require!(
                 env::prepaid_gas() >= MIN_AGENT_EXECUTE_GAS,
@@ -1617,6 +2028,73 @@ impl AccountPolicy {
             Err(PromiseError::Failed)
         );
         self.settle(&key, success)
+    }
+
+    /// The seller's registry answered for an x402 payment under an agent
+    /// approval. Funds the payment only if the account being paid holds the agent
+    /// now, the agent is active, and it has not changed hands since approval.
+    #[private]
+    pub fn on_x402_payee(
+        &mut self,
+        key: String,
+        payee: AgentRef,
+        generations: Vec<u64>,
+        #[callback_result] agent: Result<Option<PayeeAgentView>, PromiseError>,
+    ) -> PromiseOrValue<Outcome> {
+        require!(
+            env::promise_results_count() == 1,
+            "Expected one promise result"
+        );
+        let Some(request) = self.requests.get(&key).cloned() else {
+            return PromiseOrValue::Value(Outcome::denied(Reason::InvalidRequest));
+        };
+        if request.status != RequestStatus::Pending {
+            return PromiseOrValue::Value(Outcome::denied(Reason::DuplicateRequest));
+        }
+        let problem = match &agent {
+            Err(_) => Some("the seller's registry could not be read"),
+            Ok(None) => Some("the seller's registry has no such agent"),
+            Ok(Some(view)) if view.holder.as_ref() != Some(&request.recipient) => {
+                Some("the account to pay does not hold this agent")
+            }
+            Ok(Some(view)) if view.status.state != "active" => {
+                Some("the agent is paused or removed")
+            }
+            Ok(Some(view)) if generations.iter().any(|g| *g != view.generation.0) => {
+                Some("the agent changed hands since it was approved")
+            }
+            Ok(Some(_)) => None,
+        };
+        if let Some(problem) = problem {
+            let detail = format!("{}: {problem}", payee.key());
+            return PromiseOrValue::Value(self.fail_x402(
+                &key,
+                Reason::AgentPayeeMismatch,
+                &detail,
+            ));
+        }
+        let charge: Option<X402Charge> = read_stored(&prefixed_key(StorageKey::X402Charges, &key));
+        let (
+            Some(charge),
+            Some(Via::X402 {
+                payment_account, ..
+            }),
+        ) = (charge, request.via.clone())
+        else {
+            return PromiseOrValue::Value(self.fail_x402(
+                &key,
+                Reason::InvalidRequest,
+                "missing x402 request state",
+            ));
+        };
+        fund_x402(
+            charge.asset,
+            payment_account,
+            &request.recipient,
+            request.amount.0,
+            key,
+        )
+        .into()
     }
 
     // ---------------------------------------------------------------- "ask me first"
@@ -1878,6 +2356,13 @@ impl AccountPolicy {
         })
     }
 
+    /// What this version of the policy supports, so apps can offer the right actions.
+    pub fn get_features(&self) -> Vec<String> {
+        ["x402", "x402_sites", "x402_agents", "upgrade_code"]
+            .map(String::from)
+            .to_vec()
+    }
+
     pub fn get_x402_config(&self) -> Option<X402Config> {
         self.x402_config()
     }
@@ -1887,13 +2372,24 @@ impl AccountPolicy {
     }
 
     /// Today's x402 usage for a mandate, and for one seller when `seller` is given.
-    pub fn get_x402_usage(&self, agent_id: AgentId, seller: Option<AccountId>) -> X402UsageView {
+    /// Optionally also for one seller account, website, or agent (`<agent_id>@<registry>`).
+    pub fn get_x402_usage(
+        &self,
+        agent_id: AgentId,
+        seller: Option<AccountId>,
+        site: Option<String>,
+        payee: Option<String>,
+    ) -> X402UsageView {
         let today = day_index(env::block_timestamp());
         X402UsageView {
             day: today,
             mandate_used_today: U128(self.used(&UsageKey::X402Mandate(agent_id.clone()), today)),
             seller_used_today: seller
                 .map(|s| U128(self.used(&UsageKey::X402Seller(agent_id.clone(), s), today))),
+            site_used_today: site
+                .map(|s| U128(self.used(&UsageKey::X402Site(agent_id.clone(), s), today))),
+            payee_used_today: payee
+                .map(|p| U128(self.used(&UsageKey::X402Payee(agent_id.clone(), p), today))),
             unlisted_used_today: U128(self.used(&UsageKey::X402Unlisted(agent_id), today)),
             account_used_today: U128(self.used(&UsageKey::X402Account, today)),
         }
@@ -1931,18 +2427,17 @@ impl AccountPolicy {
         if self.requests.contains_key(&key) || self.pending.contains_key(&key) {
             return refuse(Reason::DuplicateRequest);
         }
-        if let Action::X402Pay {
-            asset,
-            pay_to,
-            amount,
-        } = &ctx.action
-        {
-            // The payment account is unknown in a view; `admit_x402` checks it.
-            return match self.check_x402(&ctx.path, asset, pay_to, amount.0, None) {
-                Ok(charges) => Preview {
+        if ctx.action.is_x402() {
+            if !ctx.action.is_well_formed() {
+                return refuse(Reason::InvalidRequest);
+            }
+            // The payment account is unknown in a view, and a view cannot read the
+            // seller's registry; `admit_x402` checks both.
+            return match self.check_x402(&ctx.path, &ctx.action, None) {
+                Ok(check) => Preview {
                     allowed: true,
                     reason: None,
-                    mandates: charges.into_iter().map(|(a, _)| a).collect(),
+                    mandates: check.matches.into_iter().map(|(a, _)| a).collect(),
                     needs_confirmation: false,
                 },
                 Err(reason) => refuse(reason),
@@ -2315,17 +2810,26 @@ impl AccountPolicy {
         read_stored(&prefixed_key(StorageKey::X402Rules, agent_id))
     }
 
-    /// Checks an x402 payment against the policy. Returns each mandate that
-    /// applies, and whether the seller is unlisted for it. `payment_account` is
-    /// `None` only in a preview.
+    /// Checks an x402 payment against the policy. Returns the rule each mandate
+    /// on the path used, and the seller's agent claim to verify when a rule
+    /// relies on it. `payment_account` is `None` only in a preview.
     fn check_x402(
         &self,
         path: &[PathNode],
-        asset: &AccountId,
-        pay_to: &AccountId,
-        amount: u128,
+        action: &Action,
         payment_account: Option<&AccountId>,
-    ) -> Result<Vec<(AgentId, bool)>, Reason> {
+    ) -> Result<X402Check, Reason> {
+        let Action::X402Pay {
+            asset,
+            pay_to,
+            amount,
+            site,
+            payee_agent,
+        } = action
+        else {
+            return Err(Reason::InvalidRequest);
+        };
+        let amount = amount.0;
         if self.paused {
             return Err(Reason::PaymentsPaused);
         }
@@ -2343,7 +2847,10 @@ impl AccountPolicy {
         }
         let now = env::block_timestamp();
         let today = day_index(now);
-        let mut applied = Vec::new();
+        let claim = payee_agent.as_ref().map(AgentRef::key);
+        let mut matches = Vec::new();
+        let mut generations = Vec::new();
+        let mut verify = false;
         for (i, node) in path.iter().enumerate() {
             let Some(mandate) = self.mandates.get(&node.agent_id) else {
                 continue;
@@ -2352,43 +2859,67 @@ impl AccountPolicy {
             let rules = self
                 .x402_rules(&node.agent_id)
                 .ok_or(Reason::X402NotEnabled)?;
-            let unlisted = match rules.sellers.get(pay_to) {
-                Some(limit) => {
-                    if amount > limit.per_payment_cap.0 {
-                        return Err(Reason::PerPaymentCap);
-                    }
-                    let used = self.used(
-                        &UsageKey::X402Seller(node.agent_id.clone(), pay_to.clone()),
-                        today,
-                    );
-                    if used + amount > limit.daily_cap.0 {
-                        return Err(Reason::RecipientDailyCap);
-                    }
-                    false
+            let agent = node.agent_id.clone();
+            // First match wins: a claimed agent, the seller's account, the website, the unlisted pool.
+            let (matched, per_payment, daily, used_key, over_daily) = if let Some((key, rule)) =
+                claim.as_ref().and_then(|k| rules.agents.get_key_value(k))
+            {
+                verify = true;
+                generations.extend(rule.generation);
+                (
+                    PayeeMatch::Agent(key.clone()),
+                    rule.per_payment_cap.0,
+                    rule.daily_cap.0,
+                    UsageKey::X402Payee(agent.clone(), key.clone()),
+                    Reason::RecipientDailyCap,
+                )
+            } else if let Some(limit) = rules.sellers.get(pay_to) {
+                (
+                    PayeeMatch::Account,
+                    limit.per_payment_cap.0,
+                    limit.daily_cap.0,
+                    UsageKey::X402Seller(agent.clone(), pay_to.clone()),
+                    Reason::RecipientDailyCap,
+                )
+            } else if let Some((name, rule)) =
+                site.as_ref().and_then(|s| rules.sites.get_key_value(s))
+            {
+                if rule.pay_to.as_ref().is_some_and(|p| p != pay_to) {
+                    return Err(Reason::SitePayeeMismatch);
                 }
-                None => {
-                    let limit = rules
-                        .unlisted
-                        .as_ref()
-                        .ok_or(Reason::RecipientNotApproved)?;
-                    if amount > limit.per_payment_cap.0 {
-                        return Err(Reason::PerPaymentCap);
-                    }
-                    let used = self.used(&UsageKey::X402Unlisted(node.agent_id.clone()), today);
-                    if used + amount > limit.daily_cap.0 {
-                        return Err(Reason::UnlistedDailyCap);
-                    }
-                    true
-                }
+                (
+                    PayeeMatch::Site(name.clone()),
+                    rule.per_payment_cap.0,
+                    rule.daily_cap.0,
+                    UsageKey::X402Site(agent.clone(), name.clone()),
+                    Reason::RecipientDailyCap,
+                )
+            } else {
+                let limit = rules
+                    .unlisted
+                    .as_ref()
+                    .ok_or(Reason::RecipientNotApproved)?;
+                (
+                    PayeeMatch::Unlisted,
+                    limit.per_payment_cap.0,
+                    limit.daily_cap.0,
+                    UsageKey::X402Unlisted(agent.clone()),
+                    Reason::UnlistedDailyCap,
+                )
             };
-            if self.used(&UsageKey::X402Mandate(node.agent_id.clone()), today) + amount
-                > rules.daily_cap.0
+            if amount > per_payment {
+                return Err(Reason::PerPaymentCap);
+            }
+            if self.used(&used_key, today) + amount > daily {
+                return Err(over_daily);
+            }
+            if self.used(&UsageKey::X402Mandate(agent.clone()), today) + amount > rules.daily_cap.0
             {
                 return Err(Reason::MandateDailyCap);
             }
-            applied.push((node.agent_id.clone(), unlisted));
+            matches.push((agent, matched));
         }
-        if applied.is_empty() {
+        if matches.is_empty() {
             return Err(Reason::NoMandate);
         }
         if let Some(cap) = config.account_daily_cap {
@@ -2396,7 +2927,13 @@ impl AccountPolicy {
                 return Err(Reason::AccountDailyCap);
             }
         }
-        Ok(applied)
+        Ok(X402Check {
+            matches,
+            verify: payee_agent
+                .clone()
+                .filter(|_| verify)
+                .map(|agent| (agent, generations)),
+        })
     }
 
     /// Admits an authenticated x402 request: duplicate check, x402 check, then
@@ -2416,16 +2953,17 @@ impl AccountPolicy {
                 asset,
                 pay_to,
                 amount,
+                ..
             },
             Via::X402 {
                 payment_account, ..
             },
-        ) = (action, &via)
+        ) = (&action, &via)
         else {
             return PromiseOrValue::Value(Outcome::denied(Reason::InvalidRequest));
         };
+        let (asset, pay_to, amount) = (asset.clone(), pay_to.clone(), amount.0);
         let payment_account = payment_account.clone();
-        let amount = amount.0;
         let now = env::block_timestamp();
         self.prune(now);
         self.expire_overdue(now);
@@ -2435,9 +2973,8 @@ impl AccountPolicy {
         if self.requests.contains_key(&key) || self.pending.contains_key(&key) {
             return PromiseOrValue::Value(Outcome::denied(Reason::DuplicateRequest));
         }
-        let charges = match self.check_x402(&path, &asset, &pay_to, amount, Some(&payment_account))
-        {
-            Ok(charges) => charges,
+        let check = match self.check_x402(&path, &action, Some(&payment_account)) {
+            Ok(check) => check,
             Err(reason) => {
                 return PromiseOrValue::Value(self.deny(
                     &leaf,
@@ -2452,16 +2989,14 @@ impl AccountPolicy {
             }
         };
         let today = day_index(now);
-        let mandates: Vec<AgentId> = charges.iter().map(|(a, _)| a.clone()).collect();
-        let unlisted: Vec<AgentId> = charges
-            .iter()
-            .filter(|(_, unlisted)| *unlisted)
-            .map(|(a, _)| a.clone())
-            .collect();
-        self.reserve_x402(&mandates, &unlisted, &pay_to, today, amount);
+        let mandates: Vec<AgentId> = check.matches.iter().map(|(a, _)| a.clone()).collect();
+        self.reserve_x402(&check.matches, &pay_to, today, amount);
         write_stored(
             &prefixed_key(StorageKey::X402Charges, &key),
-            &X402Charge { unlisted },
+            &X402Charge {
+                asset: asset.clone(),
+                matches: check.matches,
+            },
         );
         self.store_in_flight(
             key.clone(),
@@ -2482,69 +3017,88 @@ impl AccountPolicy {
         }
         .emit();
 
-        Promise::new(asset)
-            .function_call(
-                "ft_transfer".to_string(),
-                json!({
-                    "receiver_id": payment_account,
-                    "amount": U128(amount),
-                    "memo": format!("x402 {pay_to}"),
-                })
-                .to_string()
-                .into_bytes(),
-                NearToken::from_yoctonear(1),
-                GAS_FOR_FT_TRANSFER,
-            )
-            .then(
-                Self::ext(env::current_account_id())
-                    .with_static_gas(GAS_FOR_SETTLE)
-                    .on_settle(key),
-            )
-            .into()
+        match check.verify {
+            None => fund_x402(asset, payment_account, &pay_to, amount, key).into(),
+            // The amount is reserved first, so requests racing this check cannot overspend.
+            Some((agent, generations)) => ext_payee_registry::ext(agent.registry.clone())
+                .with_static_gas(GAS_FOR_GET_AGENT)
+                .with_unused_gas_weight(0)
+                .get_agent(agent.agent_id.clone())
+                .then(
+                    Self::ext(env::current_account_id())
+                        .with_static_gas(GAS_FOR_ON_PAYEE)
+                        .on_x402_payee(key, agent, generations),
+                )
+                .into(),
+        }
     }
 
     fn reserve_x402(
         &mut self,
-        mandates: &[AgentId],
-        unlisted: &[AgentId],
+        matches: &[(AgentId, PayeeMatch)],
         pay_to: &AccountId,
         day: u64,
         amount: u128,
     ) {
-        for agent_id in mandates {
-            self.add_usage(UsageKey::X402Mandate(agent_id.clone()), day, amount);
-            self.add_usage(
-                UsageKey::X402Seller(agent_id.clone(), pay_to.clone()),
-                day,
-                amount,
-            );
-        }
-        for agent_id in unlisted {
-            self.add_usage(UsageKey::X402Unlisted(agent_id.clone()), day, amount);
+        for (agent_id, matched) in matches {
+            for key in x402_usage_keys(agent_id, matched, pay_to) {
+                self.add_usage(key, day, amount);
+            }
         }
         self.add_usage(UsageKey::X402Account, day, amount);
     }
 
     fn release_x402(
         &mut self,
-        mandates: &[AgentId],
-        unlisted: &[AgentId],
+        matches: &[(AgentId, PayeeMatch)],
         pay_to: &AccountId,
         day: u64,
         amount: u128,
     ) {
-        for agent_id in mandates {
-            self.release_usage(UsageKey::X402Mandate(agent_id.clone()), day, amount);
-            self.release_usage(
-                UsageKey::X402Seller(agent_id.clone(), pay_to.clone()),
-                day,
-                amount,
-            );
-        }
-        for agent_id in unlisted {
-            self.release_usage(UsageKey::X402Unlisted(agent_id.clone()), day, amount);
+        for (agent_id, matched) in matches {
+            for key in x402_usage_keys(agent_id, matched, pay_to) {
+                self.release_usage(key, day, amount);
+            }
         }
         self.release_usage(UsageKey::X402Account, day, amount);
+    }
+
+    /// Ends an x402 request before any token moved: releases what it reserved,
+    /// keeps the request ID used, and records the denial.
+    fn fail_x402(&mut self, key: &str, reason: Reason, detail: &str) -> Outcome {
+        let request = self
+            .requests
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| env::panic_str("Unknown request"));
+        let charge_key = prefixed_key(StorageKey::X402Charges, key);
+        if let Some(charge) = read_stored::<X402Charge>(&charge_key) {
+            self.release_x402(
+                &charge.matches,
+                &request.recipient,
+                request.day,
+                request.amount.0,
+            );
+        }
+        env::storage_remove(&charge_key);
+        self.requests.get_mut(key).unwrap().status = RequestStatus::Declined;
+        self.record_activity(
+            &request.leaf,
+            &request.request_id,
+            &request.recipient,
+            request.amount.0,
+            "denied",
+            Some(reason),
+            request.via.clone(),
+            request.client.clone(),
+        );
+        PolicyEvent::PaymentDenied {
+            leaf: request.leaf,
+            request_id: request.request_id,
+            reason,
+        }
+        .emit();
+        Outcome::denied_with(reason, detail)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2740,14 +3294,9 @@ impl AccountPolicy {
             // x402 usage is in the token, never part of the NEAR `reserved_total`.
             let charge_key = prefixed_key(StorageKey::X402Charges, key);
             if !success {
-                let charge: X402Charge = read_stored(&charge_key).unwrap_or_default();
-                self.release_x402(
-                    &request.mandates,
-                    &charge.unlisted,
-                    &request.recipient,
-                    request.day,
-                    amount,
-                );
+                if let Some(charge) = read_stored::<X402Charge>(&charge_key) {
+                    self.release_x402(&charge.matches, &request.recipient, request.day, amount);
+                }
             }
             env::storage_remove(&charge_key);
         } else if success {

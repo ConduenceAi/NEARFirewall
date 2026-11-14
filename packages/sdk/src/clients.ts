@@ -179,6 +179,16 @@ export class PolicyClient {
     return viewParsed(this.rpc, this.payerId, "get_usage", { agent_id: agentId, recipient: recipient ?? null }, UsageView);
   }
 
+  /** What the deployed policy supports, such as `upgrade_code`. Empty for policies that predate this view. */
+  async features(): Promise<string[]> {
+    try {
+      return await viewParsed(this.rpc, this.payerId, "get_features", {}, z.array(z.string()));
+    } catch (error) {
+      if (isMissingMethod(error)) return [];
+      throw error;
+    }
+  }
+
   /** Whether the deployed policy supports x402 at all, and its settings when it is on. */
   async x402Status(): Promise<{ supported: boolean; config: X402Config | null }> {
     try {
@@ -208,8 +218,15 @@ export class PolicyClient {
     }
   }
 
-  getX402Usage(agentId: string, seller?: string) {
-    return viewParsed(this.rpc, this.payerId, "get_x402_usage", { agent_id: agentId, seller: seller ?? null }, X402UsageView);
+  /** Today's x402 usage for a mandate, and optionally for one seller account, website, or agent (`<id>@<registry>`). */
+  getX402Usage(agentId: string, seller?: string, extra: { site?: string; payee?: string } = {}) {
+    return viewParsed(
+      this.rpc,
+      this.payerId,
+      "get_x402_usage",
+      { agent_id: agentId, seller: seller ?? null, site: extra.site ?? null, payee: extra.payee ?? null },
+      X402UsageView,
+    );
   }
 
   getRequest(leaf: string, requestId: string) {
@@ -255,12 +272,15 @@ export class PolicyClient {
 export type RegistryState =
   | { kind: "missing" }
   | { kind: "ready"; codeHash: string }
+  /** The owner's own registry, with no keys, but running older code than the app expects. */
+  | { kind: "outdated"; codeHash: string; upgradable: boolean }
   | { kind: "untrusted"; reason: string };
 
 /**
  * Checks an owner's registry before the app trusts it: the account exists, it
- * runs the expected code, it has no access keys (so nobody can change the code),
- * and its owner is the connected account.
+ * runs the expected code, it has no access keys (so nobody can change the code
+ * except through its own owner-only `upgrade_code`), and its owner is the
+ * connected account. Older code from the same owner is reported as `outdated`.
  */
 export async function checkRegistry(rpc: NearRpc, registryId: string, owner: string, expectedCodeHash?: string): Promise<RegistryState> {
   if (!(await rpc.accountExists(registryId))) return { kind: "missing" };
@@ -269,12 +289,19 @@ export async function checkRegistry(rpc: NearRpc, registryId: string, owner: str
     return { kind: "untrusted", reason: `${registryId} uses code managed by ${account.globalContractAccountId}.` };
   }
   if (account.codeHash === EMPTY_CODE_HASH) return { kind: "untrusted", reason: `${registryId} exists but runs no contract.` };
-  if (expectedCodeHash && account.codeHash !== expectedCodeHash) {
-    return { kind: "untrusted", reason: `${registryId} runs different code (${account.codeHash}).` };
-  }
   const keys = await rpc.viewAccessKeys(registryId);
   if (keys.length > 0) return { kind: "untrusted", reason: `${registryId} has access keys, so its code could be changed.` };
-  const registryOwner = await new RegistryClient(rpc, registryId).getOwner().catch(() => null);
-  if (registryOwner !== owner) return { kind: "untrusted", reason: `${registryId} is not owned by ${owner}.` };
+  const client = new RegistryClient(rpc, registryId);
+  const registryOwner = await client.getOwner().catch(() => null);
+  if (registryOwner !== owner) {
+    return expectedCodeHash && account.codeHash !== expectedCodeHash
+      ? { kind: "untrusted", reason: `${registryId} runs different code (${account.codeHash}).` }
+      : { kind: "untrusted", reason: `${registryId} is not owned by ${owner}.` };
+  }
+  if (expectedCodeHash && account.codeHash !== expectedCodeHash) {
+    // Registries with `upgrade_code` answer `is_code_frozen`; older ones cannot be upgraded.
+    const frozen = await rpc.view(registryId, "is_code_frozen", {}).then((v) => v === true).catch(() => null);
+    return { kind: "outdated", codeHash: account.codeHash, upgradable: frozen === false };
+  }
   return { kind: "ready", codeHash: account.codeHash };
 }

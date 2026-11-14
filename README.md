@@ -83,16 +83,27 @@ Before the first purchase, the owner sets these rules on-chain, under **Payments
 
 - Turn x402 on for the account, in USDC, with an optional account-wide daily cap.
 - Give the agent an x402 cap per payment, at registration or later. The cap lives on the agent NFT, and child agents can only narrow it.
-- Set a daily x402 budget, any approved sellers with their own limits, and a small shared budget for sellers that are not listed (default 0.05 USDC each and 0.25 USDC a day for all of them together).
+- Set a daily x402 budget and a small shared budget for sellers that are not approved (default 0.05 USDC each and 0.25 USDC a day for all of them together).
+- Approve payees, each with its own limits. Agents can pay each other, so a payee can be more than a wallet address:
+
+  | Approve | Paid when | Enforced |
+  | --- | --- | --- |
+  | **An agent**, by its NFT (registry and agent ID) | The account being paid holds that agent now, and the agent has not changed hands since approval | On-chain: the policy reads the seller's registry before it pays |
+  | **A seller account** | The seller asks to be paid at that account | On-chain |
+  | **A website**, such as `api.example.com` | The agent's client fetched that site. If the owner pins an account, the site must ask to be paid there | On-chain when pinned. Otherwise the policy relies on the client's report of the site |
+
+  A payment uses the first rule that matches, in this order, then falls back to the shared budget for unapproved sellers.
 - Set up each connection's payment account. This sends 0.01 NEAR and registers the account with USDC.
 
-x402 needs contracts built from this revision. Registries deployed earlier have no access keys, so they cannot be upgraded. Use a fresh Testnet account.
+**Wallets that refuse contract deployments.** Some wallets, Meteor among them, will not sign a contract deployment. Choose **Use a one-time setup key** when creating the registry or enabling payments. The wallet signs only one transaction, which adds a temporary key generated in the page. The page then installs the contract with that key, and the same transaction deletes the key. Later upgrades are ordinary wallet calls: both contracts have an owner-only `upgrade_code`, and an owner can freeze the registry's code for good. Registries created before this release have no keys and no `upgrade_code`, so they cannot gain x402. For x402, use a fresh account.
 
 | Do this | See this |
 | --- | --- |
-| `npm test -- packages/x402/test/x402.test.ts` | Local buyer and paywall tests with mocked NEAR and facilitator responses. They cover successful purchase, free responses, price limits, policy refusal, and seller settlement. |
+| `npm test -- packages/x402` | The buyer, seller paywall, and facilitator, with mocked chain reads. Tests cover a full purchase over HTTP, the payee labels sent to the policy, price limits, policy refusal, signature and nonce checks, and duplicate settlement. |
+| `node scripts/x402-demo.ts setup --buyer <a>.testnet --seller <b>.testnet` | Sets up two Testnet owners whose keys are in the NEAR CLI keychain. The buyer agent is approved to pay the seller's agent by its NFT, and gets a small budget for unknown shops. It then prints the next steps. |
+| `node scripts/x402-facilitator.ts --relayer <b>.testnet` and `node scripts/x402-seller.ts` | A local facilitator that relays payments and pays the gas, and three paid sellers: the seller's agent, unknown shops, and a dataset priced above the cap. |
 
-The linked Testnet receipts document native NEAR payments. x402 verification here uses the local tests.
+The linked Testnet receipts document native NEAR payments. x402 has been verified with the local tests and a local run of the seller and facilitator scripts. It has not yet run on Testnet.
 
 ### Deploy the dashboard and gateway to Vercel
 

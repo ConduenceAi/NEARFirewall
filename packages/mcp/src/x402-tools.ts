@@ -61,8 +61,17 @@ export function x402RulesLines(r: AgentX402Rules): string[] {
     "x402 payments in USDC (fetch_paid):",
     `- Largest single payment: ${formatUsdc(r.maxPerPayment!)} USDC.`,
     ...r.budgets.map((b) => `- Daily x402 budget (${b.handle}): ${formatUsdc(b.usedToday)} of ${formatUsdc(b.daily)} USDC used today.`),
+    ...r.agents.map(
+      (a) =>
+        `- Approved agent ${a.payee}: up to ${formatUsdc(a.perPayment)} USDC each, ${formatUsdc(a.daily)} per day (${formatUsdc(a.usedToday)} used today). Paid only if the seller's account holds that agent now.`,
+    ),
     ...r.sellers.map(
       (s) => `- Approved seller ${s.seller}: up to ${formatUsdc(s.perPayment)} USDC each, ${formatUsdc(s.daily)} per day (${formatUsdc(s.usedToday)} used today).`,
+    ),
+    ...r.sites.map(
+      (s) =>
+        `- Approved website ${s.site}: up to ${formatUsdc(s.perPayment)} USDC each, ${formatUsdc(s.daily)} per day (${formatUsdc(s.usedToday)} used today)` +
+        (s.payTo ? `, paid only to ${s.payTo}.` : "."),
     ),
     r.unlisted
       ? `- Any other seller: up to ${formatUsdc(r.unlisted.perPayment)} USDC each, ${formatUsdc(r.unlisted.daily)} USDC per day for all of them together (${formatUsdc(r.unlisted.usedToday)} used today).`

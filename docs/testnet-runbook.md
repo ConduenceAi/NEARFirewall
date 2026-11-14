@@ -8,7 +8,7 @@ The original demo commands were run on Windows on 2026-11-12 with `cargo-near` 0
 
 ## Fresh owner registry and local MCP
 
-1. Use a fresh named Testnet account with enough NEAR for storage and the planned payments. The two direct contract deployments require roughly 7 NEAR for code and registry storage before payment funds.
+1. Use a fresh named Testnet account with enough NEAR for storage and the planned payments. The two direct contract deployments need about 9.5 NEAR before payment funds: 4 NEAR moves to the registry, and the policy's code (about 530 KB) locks about 5.3 NEAR on your account. If your wallet refuses contract deployments (Meteor does), choose **Use a one-time setup key** in steps 3 and 4.
 2. Run `npm ci` and `npm run contracts:build`. Copy both `target/near/*/*.wasm` files to `apps/web/public/`. Copy `apps/web/.env.example` to `apps/web/.env.local` and leave `VITE_REGISTRY_ID` empty. If you pin the hashes, use the Base58 checksums from your build.
 3. Run `npm run web:dev`. Connect the owner wallet, choose **Create my registry**, register an agent, and enable payments. Leave the executor field empty for local MCP.
 4. Under **Payments**, approve a Testnet recipient. For example, use an agent cap of 5 NEAR, a recipient cap of 5 NEAR, and an **Ask me first** threshold of 4 NEAR. Allow room in the daily budgets for both test payments.
@@ -28,27 +28,41 @@ The handoff recorded the Testnet flow using the CLI and local MCP on `nfw-owner-
 
 ## x402 payments in USDC between agents
 
-Not yet run on Testnet. These steps need contracts built from the x402 revision. An owner registry deployed earlier has no access keys, so it cannot be upgraded, so start from a fresh owner account.
+Not yet run on Testnet. These steps need contracts built from the x402 revision (`npm run contracts:build`). Registries created earlier have no access keys and no `upgrade_code`, so they cannot gain x402. Start from fresh accounts.
 
-1. Follow steps 1–3 above with the new build. When registering the buyer agent, set **Max per x402 payment (USDC)**, for example 0.5.
-2. Get Testnet USDC for the owner account. The contract is `3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af`, with 6 decimals. The owner account must be registered with it (`storage_deposit`).
+### Scripted (two CLI-controlled owners)
+
+1. Create two funded Testnet accounts whose keys are in the NEAR CLI keychain: a buyer (Alice) and a seller (Bob). Each needs about 10 NEAR. Bob also funds three shop accounts and pays the facilitator's gas.
+2. Run `node scripts/x402-demo.ts setup --buyer <alice>.testnet --seller <bob>.testnet`. On Bob, it creates his registry, the agent `data-agent`, and the shops `shop-a`, `shop-b`, and `shop-c`, and registers all of them with USDC. On Alice, it creates her registry and policy, then the agent `researcher` with an x402 cap of 0.5 USDC. It also creates:
+   - an approval with no NEAR budget;
+   - x402 rules: a 1 USDC daily budget, Bob's `data-agent` approved by its NFT, and 0.05 USDC each, 0.10 a day for unknown sellers;
+   - a connection key whose payment account is set up in the same transaction.
+
+   It writes `.runner/x402-demo.json` and an MCP configuration next to Alice's keychain entry. Run it again at any time; it skips finished steps.
+3. Get Testnet USDC for Alice. The contract is `3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af`, with 6 decimals. The setup step already registered her with it.
+4. Start the facilitator with `node scripts/x402-facilitator.ts --relayer <bob>.testnet`. Set `X402_FACILITATOR_API_KEY` if anyone else can reach its port.
+5. Start the sellers with `node scripts/x402-seller.ts`. They serve `http://127.0.0.1:4021/report` (Bob's agent), `:4022/shop-a`, `/shop-b`, `/shop-c` (unknown sellers), and `:4023/dataset` (2 USDC).
+6. Add the printed MCP configuration to Claude Desktop and restart it. It sets `NEARFIREWALL_ALLOW_LOCAL_FETCH=1` so Claude can reach the local sellers; never use that setting outside a local demo.
+7. In Claude, check these outcomes:
+   - `get_rules` lists the x402 limits.
+   - Buying the report is paid under the agent approval.
+   - After two shop purchases, the third is refused with `UNLISTED_DAILY_CAP`.
+   - The dataset is refused with `PER_PAYMENT_CAP`.
+   - Watch with `node scripts/x402-demo.ts status --buyer <alice>.testnet`, or **Activity** in the app.
+8. To show a website approval, approve `127.0.0.1:4022` under **Payments → x402 → Approved websites**, optionally pinned to a shop's account. The shops are then paid under that site's limits.
+
+### In the app (one wallet)
+
+1. Create the registry and enable payments. If the wallet refuses a contract deployment, choose **Use a one-time setup key**.
+2. When registering the agent, set **Max per x402 payment (USDC)**.
 3. Under **Payments → x402 payments (USDC)**:
-   - Choose **Turn on x402 in USDC**.
-   - For the agent, choose **Approve for x402 only**.
-   - Set its daily budget and the unlisted-seller budget. The defaults are 0.05 USDC each and 0.25 USDC a day.
-   - Optionally approve a seller by name.
-4. Connect the agent as in step 5 above. Then, under **Payments → x402**, choose **Set up** next to the connection. It sends 0.01 NEAR to the key's payment account and registers that account with USDC.
-5. Run a seller. It can be a second owner's agent or any service that uses `createPaywall` from `@nearfirewall/x402`:
-   - Set `payTo` to an account registered with USDC.
-   - Set `facilitatorUrl` to an x402 facilitator for `near:testnet`, plus its API key if it needs one.
-6. From the buyer's MCP client, call `get_rules` (it lists the x402 limits), then `fetch_paid` on the seller's URL with `max_usdc`. Check these four outcomes:
-   - A price within the limits is paid, and **Activity** shows it in USDC.
-   - A price above the per-payment cap is refused with `PER_PAYMENT_CAP`.
-   - A second unlisted seller beyond the shared pool is refused with `UNLISTED_DAILY_CAP`.
-   - With x402 turned off, payments are refused with `X402_NOT_ENABLED`.
-7. If a seller refuses a funded payment, call `return_unspent_usdc` and check that the USDC returns to the owner.
+   - Turn x402 on.
+   - Approve the agent for x402 only.
+   - Set its budgets.
+   - Approve agents (registry and agent ID) or websites.
+4. Connect the agent, then choose **Set up** next to the connection under **Payments → x402**.
 
-The MCP server and the gateway read `NEARFIREWALL_MAX_X402`, an optional local ceiling per x402 payment in USDC. The gateway turns x402 off with `NEARFIREWALL_X402=0`.
+If a seller refuses a funded payment, call `return_unspent_usdc`; the USDC returns to the owner. The MCP server and the gateway read `NEARFIREWALL_MAX_X402`, an optional local ceiling per x402 payment in USDC. The gateway turns x402 off with `NEARFIREWALL_X402=0`.
 
 ## Current deployment
 

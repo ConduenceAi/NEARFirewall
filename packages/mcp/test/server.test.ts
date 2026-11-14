@@ -180,6 +180,8 @@ describe("x402 tools", () => {
     asset: "usdc.testnet",
     maxPerPayment: 500_000n,
     sellers: [{ seller: "known.testnet", perPayment: 200_000n, daily: 500_000n, usedToday: 0n }],
+    sites: [{ site: "api.example.com", perPayment: 100_000n, daily: 300_000n, usedToday: 0n, payTo: "example.testnet" }],
+    agents: [{ payee: "7@agents.bob.testnet", perPayment: 300_000n, daily: 600_000n, usedToday: 0n }],
     unlisted: { perPayment: 50_000n, daily: 100_000n, usedToday: 50_000n },
     budgets: [{ agentId: "1", handle: "trader", daily: 1_000_000n, usedToday: 50_000n }],
     account: { daily: null, usedToday: 50_000n },
@@ -236,6 +238,8 @@ describe("x402 tools", () => {
     expect(t).toContain("x402 payments in USDC (fetch_paid):");
     expect(t).toContain("Approved seller known.testnet: up to 0.2 USDC each, 0.5 per day");
     expect(t).toContain("Any other seller: up to 0.05 USDC each, 0.1 USDC per day for all of them together (0.05 used today)");
+    expect(t).toContain("Approved agent 7@agents.bob.testnet: up to 0.3 USDC each");
+    expect(t).toContain("Approved website api.example.com: up to 0.1 USDC each, 0.3 per day (0 used today), paid only to example.testnet.");
   });
 
   it("pays through the owner's browsing rules and labels the content as untrusted", async () => {

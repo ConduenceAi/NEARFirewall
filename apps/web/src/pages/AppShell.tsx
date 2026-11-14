@@ -7,7 +7,6 @@ import { PaymentsPanel } from "../components/PaymentsPanel.tsx";
 import { ActivityPanel } from "../components/ActivityPanel.tsx";
 import { AgentMap } from "../components/AgentMap.tsx";
 import { WalletEntry } from "../components/WalletEntry.tsx";
-import { ThemeToggle } from "../theme.tsx";
 import { useWallet } from "../wallet.tsx";
 import { href } from "../router.ts";
 import { OnboardingGuide } from "../onboarding.tsx";
@@ -52,7 +51,8 @@ function Workspace({ accountId, panel, disconnect }: { accountId: string | null;
     return () => window.clearInterval(timer);
   }, [accountId, refreshWaiting]);
   const setup = workspace?.setup;
-  const registryReady = Boolean(workspace && (!setup || setup.kind === "ready"));
+  // An outdated registry still works; its upgrade card shows above the app.
+  const registryReady = Boolean(workspace && (!setup || setup.kind === "ready" || setup.kind === "outdated"));
   const sidebarAction = sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar";
 
   return (
@@ -61,7 +61,6 @@ function Workspace({ accountId, panel, disconnect }: { accountId: string | null;
         <div className="header-inner">
           <Brand />
           <div className="top-actions">
-            <ThemeToggle />
             {accountId && (
               <div className="wallet-session">
                 <span className="wallet-account" title={accountId}><i />{accountId}</span>

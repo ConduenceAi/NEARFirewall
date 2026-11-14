@@ -224,16 +224,38 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
           add("error", "TOO_MANY_RECIPIENTS", `x402 rules can approve at most ${MAX_RECIPIENTS} sellers.`, i);
         }
         const capability = agent?.x402?.max_per_payment ?? null;
-        const limits = [...step.rules.sellers.map((s) => ({ who: s.seller, ...s })), ...(step.rules.unlisted ? [{ who: "Other sellers", ...step.rules.unlisted }] : [])];
+        const sites = step.rules.sites ?? [];
+        const payees = step.rules.agents ?? [];
+        if (sites.length > MAX_RECIPIENTS || payees.length > MAX_RECIPIENTS) {
+          add("error", "TOO_MANY_RECIPIENTS", `x402 rules can approve at most ${MAX_RECIPIENTS} websites and ${MAX_RECIPIENTS} agents.`, i);
+        }
+        for (const s of sites) {
+          if (!/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/.test(s.site) || s.site.length > 128) {
+            add("error", "INVALID_LABEL", `${s.site} is not a website host such as api.example.com.`, i);
+          }
+        }
+        for (const a of payees) {
+          if (!/^\d{1,20}$/.test(a.agentId)) add("error", "INVALID_LABEL", `${a.agentId} is not an agent ID such as 7.`, i);
+        }
+        // Accounts that would be paid: approved sellers and pinned website accounts.
+        const paidAccounts = [...step.rules.sellers.map((s) => s.seller), ...sites.flatMap((s) => (s.payTo ? [s.payTo] : []))];
+        for (const who of paidAccounts) {
+          if (who === ctx.payer) add("error", "RECIPIENT_IS_PAYER", "The payer cannot approve itself as a seller.", i);
+          if (executors.has(who) || agent?.executor === who) {
+            add("error", "RECIPIENT_IS_EXECUTOR", `${who} is an agent executor. An agent must never be able to pay itself.`, i);
+          }
+        }
+        const limits = [
+          ...step.rules.sellers.map((s) => ({ who: s.seller, ...s })),
+          ...sites.map((s) => ({ who: s.site, ...s })),
+          ...payees.map((a) => ({ who: `agent #${a.agentId}@${a.registry}`, ...a })),
+          ...(step.rules.unlisted ? [{ who: "Other sellers", ...step.rules.unlisted }] : []),
+        ];
         const seen = new Set<string>();
         for (const limit of limits) {
           if (limit.who !== "Other sellers") {
             if (seen.has(limit.who)) add("error", "DUPLICATE_RECIPIENT", `${limit.who} is listed twice.`, i);
             seen.add(limit.who);
-            if (limit.who === ctx.payer) add("error", "RECIPIENT_IS_PAYER", "The payer cannot approve itself as a seller.", i);
-            if (executors.has(limit.who) || agent?.executor === limit.who) {
-              add("error", "RECIPIENT_IS_EXECUTOR", `${limit.who} is an agent executor. An agent must never be able to pay itself.`, i);
-            }
           }
           if (limit.perPaymentCap <= 0n || limit.dailyCap <= 0n) {
             add("error", "ZERO_CAP", `${limit.who} needs a per-payment and a daily limit above zero.`, i);

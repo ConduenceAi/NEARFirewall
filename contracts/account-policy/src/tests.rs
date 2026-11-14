@@ -1812,6 +1812,8 @@ fn x402(seller: &str, c: u128) -> Action {
         asset: usdc(),
         pay_to: acc(seller),
         amount: U128(cents(c)),
+        site: None,
+        payee_agent: None,
     }
 }
 
@@ -1848,6 +1850,8 @@ fn x402_policy() -> (AccountPolicy, PublicKey) {
         U128(cents(100)),
         vec![seller("known.testnet", 20, 50)],
         Some(limit(5, 10)),
+        None,
+        None,
     );
     (p, key)
 }
@@ -1902,7 +1906,7 @@ fn x402_payment_account_is_the_keys_implicit_account() {
 fn x402_listed_seller_settles_and_is_recorded_in_the_token() {
     let (mut p, key) = x402_policy();
     assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 1), settled(1));
-    let usage = p.get_x402_usage("1".into(), Some(acc("known.testnet")));
+    let usage = p.get_x402_usage("1".into(), Some(acc("known.testnet")), None, None);
     assert_eq!(usage.mandate_used_today, U128(cents(20)));
     assert_eq!(usage.seller_used_today, Some(U128(cents(20))));
     assert_eq!(usage.unlisted_used_today, U128(0));
@@ -1923,6 +1927,8 @@ fn x402_listed_seller_settles_and_is_recorded_in_the_token() {
             public_key: String::from(&key),
             label: "Claude on laptop".into(),
             payment_account: payment_account(),
+            site: None,
+            payee_agent: None,
         })
     );
     assert_eq!(
@@ -1962,7 +1968,8 @@ fn x402_unlisted_sellers_share_one_small_budget() {
         denied(Reason::UnlistedDailyCap)
     );
     assert_eq!(
-        p.get_x402_usage("1".into(), None).unlisted_used_today,
+        p.get_x402_usage("1".into(), None, None, None)
+            .unlisted_used_today,
         U128(cents(10))
     );
     // An approved seller still has its own room.
@@ -1977,6 +1984,8 @@ fn x402_without_an_unlisted_rule_refuses_unknown_sellers() {
         "1".into(),
         U128(cents(100)),
         vec![seller("known.testnet", 20, 50)],
+        None,
+        None,
         None,
     );
     assert_eq!(
@@ -1995,6 +2004,8 @@ fn x402_branch_and_account_caps_apply() {
         U128(cents(30)),
         vec![seller("known.testnet", 20, 50)],
         Some(limit(5, 10)),
+        None,
+        None,
     );
     assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 1), settled(1));
     assert_eq!(
@@ -2017,6 +2028,8 @@ fn x402_refuses_other_tokens_and_needs_x402_turned_on() {
         asset: acc("other-token.testnet"),
         pay_to: acc("known.testnet"),
         amount: U128(cents(1)),
+        site: None,
+        payee_agent: None,
     };
     assert_eq!(
         through_x402_with(&mut p, &key, other, 1, 10, Some(true)),
@@ -2044,7 +2057,7 @@ fn x402_failed_funding_releases_the_reservation() {
         through_x402_with(&mut p, &key, x402("a.testnet", 5), 1, 10, Some(false)),
         Outcome::Failed { request_id: rid(1) }
     );
-    let usage = p.get_x402_usage("1".into(), Some(acc("a.testnet")));
+    let usage = p.get_x402_usage("1".into(), Some(acc("a.testnet")), None, None);
     assert_eq!(usage.mandate_used_today, U128(0));
     assert_eq!(usage.seller_used_today, Some(U128(0)));
     assert_eq!(usage.unlisted_used_today, U128(0));
@@ -2139,7 +2152,8 @@ fn x402_and_near_budgets_are_separate() {
         U128(2 * NEAR)
     );
     assert_eq!(
-        p.get_x402_usage("1".into(), None).mandate_used_today,
+        p.get_x402_usage("1".into(), None, None, None)
+            .mandate_used_today,
         U128(cents(20))
     );
 }
@@ -2320,7 +2334,7 @@ fn executor_mode_refuses_x402() {
 fn x402_rules_need_a_mandate() {
     let (mut p, _) = x402_policy();
     as_owner(T0);
-    p.set_x402_rules("2".into(), U128(cents(100)), vec![], None);
+    p.set_x402_rules("2".into(), U128(cents(100)), vec![], None, None, None);
 }
 
 #[test]
@@ -2338,7 +2352,7 @@ fn x402_rules_cannot_change_a_fixed_mandate() {
         None,
     );
     as_owner(T0);
-    p.set_x402_rules("1".into(), U128(cents(100)), vec![], None);
+    p.set_x402_rules("1".into(), U128(cents(100)), vec![], None, None, None);
 }
 
 #[test]
@@ -2346,7 +2360,14 @@ fn x402_rules_cannot_change_a_fixed_mandate() {
 fn x402_limits_are_validated() {
     let (mut p, _) = x402_policy();
     as_owner(T0);
-    p.set_x402_rules("1".into(), U128(cents(100)), vec![], Some(limit(10, 5)));
+    p.set_x402_rules(
+        "1".into(),
+        U128(cents(100)),
+        vec![],
+        Some(limit(10, 5)),
+        None,
+        None,
+    );
 }
 
 #[test]
@@ -2354,7 +2375,7 @@ fn x402_limits_are_validated() {
 fn only_the_owner_sets_x402_rules() {
     let (mut p, _) = x402_policy();
     set_env(registry(), 1, T0, 100);
-    p.set_x402_rules("1".into(), U128(cents(100)), vec![], None);
+    p.set_x402_rules("1".into(), U128(cents(100)), vec![], None, None, None);
 }
 
 #[test]
@@ -2378,4 +2399,362 @@ fn x402_account_setup_schedules_funding_and_registration() {
     let (mut p, key) = x402_policy();
     as_owner(T0);
     let _ = p.setup_x402_account(key);
+}
+
+// ---------------------------------------------------------------- x402 websites and agents
+
+fn x402_labelled(seller: &str, c: u128, site: Option<&str>, agent: Option<(&str, &str)>) -> Action {
+    Action::X402Pay {
+        asset: usdc(),
+        pay_to: acc(seller),
+        amount: U128(cents(c)),
+        site: site.map(String::from),
+        payee_agent: agent.map(|(registry, id)| AgentRef {
+            registry: acc(registry),
+            agent_id: id.into(),
+        }),
+    }
+}
+
+fn site(name: &str, per: u128, daily: u128, pay_to: Option<&str>) -> X402SiteInput {
+    X402SiteInput {
+        site: name.into(),
+        per_payment_cap: U128(cents(per)),
+        daily_cap: U128(cents(daily)),
+        pay_to: pay_to.map(acc),
+    }
+}
+
+fn payee_agent(
+    registry: &str,
+    id: &str,
+    per: u128,
+    daily: u128,
+    generation: Option<u64>,
+) -> X402AgentInput {
+    X402AgentInput {
+        registry: acc(registry),
+        agent_id: id.into(),
+        per_payment_cap: U128(cents(per)),
+        daily_cap: U128(cents(daily)),
+        generation,
+    }
+}
+
+/// `x402_policy` plus an approved website, a pinned website, and Bob's agent #7 at generation 3.
+fn labelled_policy() -> (AccountPolicy, PublicKey) {
+    let (mut p, key) = x402_policy();
+    as_owner(T0);
+    p.set_x402_rules(
+        "1".into(),
+        U128(cents(100)),
+        vec![seller("known.testnet", 20, 50)],
+        Some(limit(5, 10)),
+        Some(vec![
+            site("api.example.com", 20, 50, None),
+            site("pinned.example.com", 20, 50, Some("pinned.testnet")),
+        ]),
+        Some(vec![payee_agent(
+            "agents.bob.testnet",
+            "7",
+            30,
+            60,
+            Some(3),
+        )]),
+    );
+    (p, key)
+}
+
+fn bob_agent(
+    holder: &str,
+    state: &str,
+    generation: u64,
+) -> Result<Option<PayeeAgentView>, PromiseError> {
+    Ok(Some(PayeeAgentView {
+        holder: Some(acc(holder)),
+        status: PayeeAgentStatus {
+            state: state.into(),
+        },
+        generation: U64(generation),
+    }))
+}
+
+/// Runs an agent-claim request: `on_authorized` reserves and asks the registry,
+/// then `answer` is fed to `on_x402_payee`, then a dispatched funding settles.
+fn through_payee_check(
+    p: &mut AccountPolicy,
+    key: &PublicKey,
+    action: Action,
+    request: u64,
+    answer: Result<Option<PayeeAgentView>, PromiseError>,
+) -> Outcome {
+    as_callback(T0);
+    let PromiseOrValue::Promise(_) = p.on_authorized(
+        String::from(key),
+        action.clone(),
+        rid(request),
+        None,
+        allowed(vec![node("1", 10)]),
+    ) else {
+        panic!("an agent claim must be checked against the registry");
+    };
+    let Action::X402Pay { payee_agent, .. } = action else {
+        unreachable!()
+    };
+    as_callback(T0);
+    match p.on_x402_payee(
+        request_key("1", &rid(request)),
+        payee_agent.unwrap(),
+        vec![3],
+        answer,
+    ) {
+        PromiseOrValue::Value(outcome) => outcome,
+        PromiseOrValue::Promise(_) => p.settle(&request_key("1", &rid(request)), true),
+    }
+}
+
+#[test]
+fn an_approved_website_has_its_own_limits() {
+    let (mut p, key) = labelled_policy();
+    // Unlabelled, an unknown seller only gets the small unlisted pool.
+    assert_eq!(
+        pay_x402(&mut p, &key, "site-owner.testnet", 20, 1),
+        denied(Reason::PerPaymentCap)
+    );
+    let paid = through_x402_with(
+        &mut p,
+        &key,
+        x402_labelled("site-owner.testnet", 20, Some("api.example.com"), None),
+        2,
+        10,
+        Some(true),
+    );
+    assert_eq!(paid, settled(2));
+    let usage = p.get_x402_usage("1".into(), None, Some("api.example.com".into()), None);
+    assert_eq!(usage.site_used_today, Some(U128(cents(20))));
+    assert_eq!(usage.unlisted_used_today, U128(0));
+    let activity = &p.get_activity(None, Some(1))[0];
+    assert!(
+        matches!(&activity.via, Some(Via::X402 { site: Some(s), .. }) if s == "api.example.com")
+    );
+}
+
+#[test]
+fn a_pinned_website_must_be_paid_at_its_account() {
+    let (mut p, key) = labelled_policy();
+    assert_eq!(
+        through_x402_with(
+            &mut p,
+            &key,
+            x402_labelled("attacker.testnet", 1, Some("pinned.example.com"), None),
+            1,
+            10,
+            Some(true)
+        ),
+        denied(Reason::SitePayeeMismatch)
+    );
+    assert_eq!(
+        through_x402_with(
+            &mut p,
+            &key,
+            x402_labelled("pinned.testnet", 20, Some("pinned.example.com"), None),
+            2,
+            10,
+            Some(true)
+        ),
+        settled(2)
+    );
+}
+
+#[test]
+fn an_approved_seller_account_wins_over_its_website() {
+    let (mut p, key) = labelled_policy();
+    assert_eq!(
+        through_x402_with(
+            &mut p,
+            &key,
+            x402_labelled("known.testnet", 20, Some("api.example.com"), None),
+            1,
+            10,
+            Some(true)
+        ),
+        settled(1)
+    );
+    let usage = p.get_x402_usage(
+        "1".into(),
+        Some(acc("known.testnet")),
+        Some("api.example.com".into()),
+        None,
+    );
+    assert_eq!(usage.seller_used_today, Some(U128(cents(20))));
+    assert_eq!(usage.site_used_today, Some(U128(0)));
+}
+
+#[test]
+fn an_approved_agent_is_paid_after_the_registry_confirms_its_holder() {
+    let (mut p, key) = labelled_policy();
+    let action = x402_labelled("bob.testnet", 30, None, Some(("agents.bob.testnet", "7")));
+    assert_eq!(
+        through_payee_check(
+            &mut p,
+            &key,
+            action,
+            1,
+            bob_agent("bob.testnet", "active", 3)
+        ),
+        settled(1)
+    );
+    let usage = p.get_x402_usage("1".into(), None, None, Some("7@agents.bob.testnet".into()));
+    assert_eq!(usage.payee_used_today, Some(U128(cents(30))));
+    let activity = &p.get_activity(None, Some(1))[0];
+    assert!(
+        matches!(&activity.via, Some(Via::X402 { payee_agent: Some(a), .. }) if a == "7@agents.bob.testnet")
+    );
+}
+
+#[test]
+fn an_agent_claim_that_does_not_check_out_is_refused_and_released() {
+    let (mut p, key) = labelled_policy();
+    for (request, (answer, why)) in [
+        (bob_agent("mallory.testnet", "active", 3), "does not hold"),
+        (bob_agent("bob.testnet", "active", 4), "changed hands"),
+        (bob_agent("bob.testnet", "paused", 3), "paused"),
+        (Ok(None), "no such agent"),
+        (Err(PromiseError::Failed), "could not be read"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request = request as u64 + 1;
+        let action = x402_labelled("bob.testnet", 30, None, Some(("agents.bob.testnet", "7")));
+        match through_payee_check(&mut p, &key, action, request, answer) {
+            Outcome::Denied { reason, detail } => {
+                assert_eq!(reason, Reason::AgentPayeeMismatch);
+                assert!(detail.unwrap().contains(why), "{why}");
+            }
+            other => panic!("expected a denial, got {other:?}"),
+        }
+        let usage = p.get_x402_usage("1".into(), None, None, Some("7@agents.bob.testnet".into()));
+        assert_eq!(usage.mandate_used_today, U128(0), "{why}");
+        assert_eq!(usage.payee_used_today, Some(U128(0)), "{why}");
+        assert_eq!(
+            p.get_request("1".into(), rid(request)).unwrap().status,
+            RequestStatus::Declined
+        );
+        assert_eq!(
+            p.get_activity(None, Some(1))[0].reason,
+            Some(Reason::AgentPayeeMismatch)
+        );
+    }
+}
+
+#[test]
+fn an_agent_claim_without_an_agent_rule_needs_no_registry_check() {
+    let (mut p, key) = labelled_policy();
+    // Agent #8 is not approved: the seller's claim is ignored and the unlisted pool applies.
+    assert_eq!(
+        through_x402_with(
+            &mut p,
+            &key,
+            x402_labelled("carol.testnet", 5, None, Some(("agents.bob.testnet", "8"))),
+            1,
+            10,
+            Some(true)
+        ),
+        settled(1)
+    );
+    assert_eq!(
+        p.get_x402_usage("1".into(), None, None, None)
+            .unlisted_used_today,
+        U128(cents(5))
+    );
+}
+
+#[test]
+#[should_panic(expected = "Attach at least 145 Tgas to agent_execute to pay an agent")]
+fn paying_an_agent_needs_gas_for_the_registry_check() {
+    let (mut p, key) = labelled_policy();
+    as_key(&key, T0, 130);
+    let _ = p.agent_execute(
+        x402_labelled("bob.testnet", 1, None, Some(("agents.bob.testnet", "7"))),
+        rid(1),
+        None,
+    );
+}
+
+#[test]
+fn malformed_website_labels_are_refused_before_the_registry() {
+    let (mut p, key) = labelled_policy();
+    as_key(&key, T0, 200);
+    assert!(matches!(
+        p.agent_execute(
+            x402_labelled("a.testnet", 1, Some("https://evil.com/path"), None),
+            rid(1),
+            None
+        ),
+        PromiseOrValue::Value(Outcome::Denied {
+            reason: Reason::InvalidRequest,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn websites_and_agents_can_be_approved_and_removed_one_by_one() {
+    let (mut p, _) = x402_policy();
+    as_owner(T0);
+    p.approve_x402_site(
+        "1".into(),
+        "data.example.org".into(),
+        U128(cents(10)),
+        U128(cents(20)),
+        None,
+    );
+    as_owner(T0);
+    p.approve_x402_agent(
+        "1".into(),
+        acc("agents.bob.testnet"),
+        "9".into(),
+        U128(cents(10)),
+        U128(cents(20)),
+        Some(1),
+    );
+    let rules = p.get_x402_rules("1".into()).unwrap();
+    assert!(rules.sites.contains_key("data.example.org"));
+    assert_eq!(rules.agents["9@agents.bob.testnet"].generation, Some(1));
+    as_owner(T0);
+    p.remove_x402_site("1".into(), "data.example.org".into());
+    as_owner(T0);
+    p.remove_x402_agent("1".into(), "9@agents.bob.testnet".into());
+    let rules = p.get_x402_rules("1".into()).unwrap();
+    assert!(rules.sites.is_empty() && rules.agents.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "is not a website host")]
+fn website_rules_need_a_plain_host() {
+    let (mut p, _) = x402_policy();
+    as_owner(T0);
+    p.approve_x402_site(
+        "1".into(),
+        "https://example.com".into(),
+        U128(1),
+        U128(1),
+        None,
+    );
+}
+
+#[test]
+fn the_owner_can_upgrade_the_policy_from_a_wallet_call() {
+    let mut p = readme_policy();
+    as_owner(T0);
+    let _ = p.upgrade_code(vec![0, 97, 115, 109].into());
+}
+
+#[test]
+#[should_panic(expected = "Only the account itself can change its policy")]
+fn only_the_owner_upgrades_the_policy() {
+    let mut p = readme_policy();
+    set_env(registry(), 1, T0, 100);
+    let _ = p.upgrade_code(vec![1].into());
 }

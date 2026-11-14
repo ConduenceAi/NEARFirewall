@@ -107,8 +107,9 @@ describe("registry trust check", () => {
     expect((await new PolicyClient(rpc, "bob.testnet").state()).kind).toBe("other");
   });
   it("rejects wrong code, keys, or owner", async () => {
+    // The owner's own keyless registry on other code is outdated (offered an upgrade), not untrusted.
     const wrongCode = fakeRpc(views, { "agents.alice.testnet": { code_hash: "X" } });
-    expect((await checkRegistry(wrongCode, "agents.alice.testnet", "alice.testnet", "H")).kind).toBe("untrusted");
+    expect((await checkRegistry(wrongCode, "agents.alice.testnet", "alice.testnet", "H")).kind).toBe("outdated");
     const withKey = fakeRpc(views, {
       "agents.alice.testnet": { code_hash: "H", keys: [{ public_key: KEY, access_key: { permission: "FullAccess" } }] },
     });

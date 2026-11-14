@@ -6,6 +6,8 @@ import {
   describeReason,
   enablePayments,
   expirePayment,
+  grantSetupKey,
+  installPolicyWithSetupKey,
   parseNear,
   pausePayments,
   removeRecipient,
@@ -26,6 +28,8 @@ import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { ensureOk, near, timeText } from "../format.ts";
 import { useAction, useAsync } from "../hooks.ts";
 import { useWallet } from "../wallet.tsx";
+import { installWithSetupKey, loadCode } from "../setup-key.ts";
+import { PolicyUpgrade } from "./PolicyUpgrade.tsx";
 import { VendorsWizard } from "./VendorsWizard.tsx";
 import { Safeguards } from "./Safeguards.tsx";
 import { X402Section } from "./X402Panel.tsx";
@@ -53,32 +57,43 @@ export function PaymentsPanel({ onPendingChanged }: { onPendingChanged(): void }
       {action.message && <p className={`notice ${action.message.kind}`}>{action.message.text}</p>}
       {state.error && <p className="notice error">{state.error}</p>}
       {!state.data && !state.error && <p role="status">Checking your payment policy…</p>}
-      {state.data?.kind === "none" && <EnableCard accountId={accountId} busy={action.busy} exec={exec} />}
-      {state.data?.kind === "other" && (
-        <p className="notice error">
-          This account already runs a different contract (code hash {state.data.codeHash}). NEARFirewall will not replace it.
-          Use an account without a contract.
-        </p>
-      )}
-      {state.data?.kind === "enabled" && <Policy policy={policyOf(accountId)} busy={action.busy} exec={exec} onPendingChanged={onPendingChanged} />}
+      {state.data?.kind === "none" && <EnableCard accountId={accountId} busy={action.busy} exec={exec} run={action.run} />}
+      {state.data?.kind === "other" && <OtherContract accountId={accountId} codeHash={state.data.codeHash} busy={action.busy} exec={exec} run={action.run} />}
+      {state.data?.kind === "enabled" && <Policy policy={policyOf(accountId)} busy={action.busy} exec={exec} run={action.run} onPendingChanged={onPendingChanged} />}
     </section>
   );
 }
 
-function EnableCard({ accountId, busy, exec }: { accountId: string; busy: boolean; exec: Execute }) {
+type Run = (label: string, fn: () => Promise<unknown>) => Promise<boolean>;
+
+function EnableCard({ accountId, busy, exec, run }: { accountId: string; busy: boolean; exec: Execute; run: Run }) {
   const [cap, setCap] = useState("");
+  const [progress, setProgress] = useState<string | null>(null);
+  const [blocked, setBlocked] = useState(false);
+  const { send } = useWallet();
   const { registry: { registryId } } = useWorkspaceRegistry();
-  const enable = () => exec("Enable payments", async () => {
+  const enable = async () => {
+    const ok = await exec("Enable payments", async () => {
+      const accountCap = cap ? parseNear(cap) : null;
+      if (config.policyGlobalCodeHash) {
+        return enablePayments(accountId, registryId, { globalCodeHash: config.policyGlobalCodeHash }, accountCap);
+      }
+      return enablePayments(accountId, registryId, { code: await loadCode(config.policyWasmUrl, "Policy") }, accountCap);
+    });
+    if (!ok) setBlocked(true);
+  };
+  const enableWithSetupKey = () => run("Enable payments with a setup key", async () => {
+    const code = await loadCode(config.policyWasmUrl, "Policy");
     const accountCap = cap ? parseNear(cap) : null;
-    if (config.policyGlobalCodeHash) {
-      return enablePayments(accountId, registryId, { globalCodeHash: config.policyGlobalCodeHash }, accountCap);
-    }
-    const response = await fetch(config.policyWasmUrl);
-    if (!response.ok || response.headers.get("content-type")?.includes("text/html")) {
-      throw new Error("Policy WASM is unavailable. Run the contract build and copy the WASM into apps/web/public.");
-    }
-    const code = new Uint8Array(await response.arrayBuffer());
-    return enablePayments(accountId, registryId, { code }, accountCap);
+    await installWithSetupKey(
+      async (tx) => ensureOk(await send(tx)),
+      {
+        accountId,
+        grant: (key) => grantSetupKey(accountId, key),
+        install: (key) => installPolicyWithSetupKey(accountId, registryId, code, key, accountCap),
+      },
+      setProgress,
+    ).finally(() => setProgress(null));
   });
   return (
     <div className="card" id="enable-payments">
@@ -95,14 +110,46 @@ function EnableCard({ accountId, busy, exec }: { accountId: string; busy: boolea
         Optional account-wide daily cap across all agents (NEAR)
         <input value={cap} onChange={(e) => setCap(e.target.value)} inputMode="decimal" />
       </label>
-      <button disabled={busy} onClick={() => void enable()}>
-        Enable payments
-      </button>
+      <div className="actions">
+        <button className="primary" disabled={busy} onClick={() => void enable()}>
+          Enable payments
+        </button>
+        <button disabled={busy} onClick={() => void enableWithSetupKey()}>
+          Use a one-time setup key
+        </button>
+      </div>
+      <p className="hint">
+        {blocked ? <strong>If your wallet refused the deployment, use the setup key. </strong> : null}
+        Some wallets, such as Meteor, refuse to deploy contracts. With a setup key, your wallet signs only one transaction that adds a temporary key.
+        This page then installs the policy with that key, and the same transaction deletes it. The key never leaves this page.
+      </p>
+      {progress && <p role="status" className="hint">{progress}</p>}
     </div>
   );
 }
 
-function Policy({ policy, busy, exec, onPendingChanged }: { policy: PolicyClient; busy: boolean; exec: Execute; onPendingChanged(): void }) {
+/**
+ * The account runs code the app does not expect. If it is an older NEARFirewall
+ * policy, offer to upgrade it in place: rules, agents, and history are kept.
+ */
+function OtherContract({ accountId, codeHash, busy, exec, run }: { accountId: string; codeHash: string; busy: boolean; exec: Execute; run: Run }) {
+  const policy = policyOf(accountId);
+  const ours = useAsync(async () => {
+    const view = await policy.getPolicy().catch(() => null);
+    return view ? { features: await policy.features() } : null;
+  }, [accountId, codeHash]);
+  if (ours.loading && ours.data === undefined) return <p role="status">Checking the contract on your account…</p>;
+  if (!ours.data) {
+    return (
+      <p className="notice error">
+        This account already runs a different contract (code hash {codeHash}). NEARFirewall will not replace it. Use an account without a contract.
+      </p>
+    );
+  }
+  return <PolicyUpgrade accountId={accountId} features={ours.data.features} busy={busy} exec={exec} run={run} />;
+}
+
+function Policy({ policy, busy, exec, run, onPendingChanged }: { policy: PolicyClient; busy: boolean; exec: Execute; run: Run; onPendingChanged(): void }) {
   const payer = policy.payerId;
   const { registry } = useWorkspaceRegistry();
   const view = useAsync(() => policy.getPolicy(), [payer, busy]);
@@ -162,7 +209,7 @@ function Policy({ policy, busy, exec, onPendingChanged }: { policy: PolicyClient
         <MandateCard key={agent.agent_id} agent={agent} policy={policy} busy={busy} exec={exec} confirmations={v?.pending !== undefined} />
       ))}
       {compatible && <VendorsWizard payer={payer} busy={busy} confirmations={v?.pending !== undefined} onSigned={() => { view.reload(); agents.reload(); }} />}
-      {compatible && <X402Section policy={policy} agents={agents.data ?? []} busy={busy} exec={exec} />}
+      {compatible && <X402Section policy={policy} agents={agents.data ?? []} busy={busy} exec={exec} run={run} />}
     </>
   );
 }

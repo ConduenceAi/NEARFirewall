@@ -21,6 +21,7 @@ import {
   formatUsdc,
   newRequestId,
   type AgentConnection,
+  type AgentRef,
   type NearNetwork,
   type NearRpc,
 } from "@nearfirewall/sdk";
@@ -57,8 +58,32 @@ export interface X402Payment {
   amount: bigint;
   asset: string;
   requestId: string;
+  /** The website that asked for payment, as sent to the owner's policy. */
+  site?: string;
+  /** The agent the seller claimed to be, which the policy checks on-chain when the owner approved it. */
+  payeeAgent?: AgentRef;
   fundingTx?: string;
   settlement?: SettlementResponse;
+}
+
+const SITE = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/;
+
+/** The website an x402 rule names: the lowercase host (and port, if not the default) of a URL. */
+export function siteOf(url: string): string | null {
+  try {
+    const host = new URL(url).host.toLowerCase();
+    return host.length <= 128 && SITE.test(host) ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The NEARFirewall agent a seller claims to be, from `extra.nearfirewall` in its terms. */
+export function claimedAgent(extra: unknown): AgentRef | null {
+  const claim = (extra as { nearfirewall?: { registry?: unknown; agentId?: unknown } } | null | undefined)?.nearfirewall;
+  if (!claim || typeof claim.registry !== "string" || typeof claim.agentId !== "string") return null;
+  if (!ACCOUNT_ID.test(claim.registry) || claim.registry.length > 64 || !/^\d{1,20}$/.test(claim.agentId)) return null;
+  return { registry: claim.registry, agent_id: claim.agentId };
 }
 
 export type X402FetchResult =
@@ -185,15 +210,21 @@ export class X402Buyer {
     }
 
     // The owner's policy decides. Nothing is signed for the seller unless it funds the payment.
+    // The site is the host that answered 402 (after redirects); the agent claim comes from
+    // the seller's terms and is checked on-chain against the seller's registry.
+    const site = siteOf(first.url);
+    const payeeAgent = claimedAgent(requirement.extra);
     const before = await ftBalanceOf(this.rpc, config.asset, this.paymentAccount).catch(() => 0n);
     const requestId = newRequestId();
-    const funding = await this.connection.fundX402(config.asset, requirement.payTo, amount, requestId);
+    const funding = await this.connection.fundX402(config.asset, requirement.payTo, amount, requestId, { site, payeeAgent });
     const payment: X402Payment = {
       resource: required.value.resource.url,
       payTo: requirement.payTo,
       amount,
       asset: config.asset,
       requestId,
+      ...(site ? { site } : {}),
+      ...(payeeAgent ? { payeeAgent } : {}),
       ...(funding.txHash ? { fundingTx: funding.txHash } : {}),
     };
     if (funding.outcome?.status !== "settled") {

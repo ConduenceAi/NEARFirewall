@@ -22,9 +22,17 @@ export type WalletAction =
       type: "AddKey";
       params: {
         publicKey: string;
-        // Always a function-call permission with an explicit allowance and method list.
-        // A full-access permission is deliberately not representable here.
+        // A function-call permission with an explicit allowance and method list.
         accessKey: { permission: { receiverId: string; allowance: string; methodNames: string[] } };
+      };
+    }
+  | {
+      type: "AddKey";
+      params: {
+        publicKey: string;
+        // Full access, built only by the one-time setup key helpers below. The
+        // setup key deletes itself in the transaction that installs the code.
+        accessKey: { permission: "FullAccess" };
       };
     }
   | { type: "DeleteKey"; params: { publicKey: string } };
@@ -69,7 +77,14 @@ export function toWireCapabilities(caps: Capabilities): Record<string, unknown> 
 
 export function toWireAction(action: Action): Record<string, unknown> {
   if (action.type === "X402Pay") {
-    return { type: action.type, asset: action.asset, pay_to: action.pay_to, amount: action.amount.toString() };
+    return {
+      type: action.type,
+      asset: action.asset,
+      pay_to: action.pay_to,
+      amount: action.amount.toString(),
+      ...(action.site ? { site: action.site } : {}),
+      ...(action.payee_agent ? { payee_agent: { registry: action.payee_agent.registry, agent_id: action.payee_agent.agent_id } } : {}),
+    };
   }
   return { type: action.type, recipient: action.recipient, amount: action.amount.toString() };
 }
@@ -270,8 +285,8 @@ export function expirePayment(payerId: string, agentId: string, requestId: strin
 
 /** Storage deposit for a registry that points at shared (global) code. */
 export const REGISTRY_DEPOSIT_GLOBAL = parseNear("0.3");
-/** Storage deposit for a registry with its own copy of the code (about 340 KB). */
-export const REGISTRY_DEPOSIT_DIRECT = parseNear("3.6");
+/** Storage deposit for a registry with its own copy of the code (about 370 KB, so about 3.7 NEAR, plus room for agents). */
+export const REGISTRY_DEPOSIT_DIRECT = parseNear("4");
 
 /**
  * Creates the owner's registry on `agents.<owner>` in one transaction signed by
@@ -428,16 +443,33 @@ export interface X402LimitInput {
   dailyCap: bigint;
 }
 
+/** An approved website (host, such as `api.example.com`). `payTo` pins the account it must be paid at. */
+export type X402SiteInput = { site: string; payTo?: string | null } & X402LimitInput;
+
+/** An approved agent in some registry. Pass its current `generation` so a transfer voids the approval. */
+export type X402AgentInput = { registry: string; agentId: string; generation?: bigint | null } & X402LimitInput;
+
 export interface X402RulesInput {
   /** Shared daily pool for x402 payments by the agent's branch. */
   dailyCap: bigint;
-  /** Sellers approved by name, each with its own limits. */
+  /** Seller accounts approved by name, each with its own limits. */
   sellers: ({ seller: string } & X402LimitInput)[];
   /** Any other seller: a small per-payment cap and one daily pool shared by all of them. `null` refuses them. */
   unlisted: X402LimitInput | null;
+  /** Websites approved by host. */
+  sites?: X402SiteInput[];
+  /** Agents in any registry, approved by their NFT. */
+  agents?: X402AgentInput[];
 }
 
 const wireLimit = (l: X402LimitInput) => ({ per_payment_cap: l.perPaymentCap.toString(), daily_cap: l.dailyCap.toString() });
+const wireSite = (s: X402SiteInput) => ({ site: s.site, ...wireLimit(s), pay_to: s.payTo ?? null });
+const wireAgent = (a: X402AgentInput) => ({
+  registry: a.registry,
+  agent_id: a.agentId,
+  ...wireLimit(a),
+  generation: a.generation == null ? null : Number(a.generation),
+});
 
 /** Sets an agent's x402 rules. The agent needs an active, editable mandate (`setMandate`). */
 export const setX402Rules = (payerId: string, agentId: string, rules: X402RulesInput) =>
@@ -446,7 +478,23 @@ export const setX402Rules = (payerId: string, agentId: string, rules: X402RulesI
     daily_cap: rules.dailyCap.toString(),
     sellers: rules.sellers.map((s) => ({ seller: s.seller, ...wireLimit(s) })),
     unlisted: rules.unlisted ? wireLimit(rules.unlisted) : null,
+    // Sent only when set, so the call reads the same to policies that predate them.
+    ...(rules.sites?.length ? { sites: rules.sites.map(wireSite) } : {}),
+    ...(rules.agents?.length ? { agents: rules.agents.map(wireAgent) } : {}),
   });
+
+export const approveX402Site = (payerId: string, agentId: string, site: X402SiteInput) =>
+  oneYoctoCall(payerId, "approve_x402_site", { agent_id: agentId, ...wireSite(site) });
+export const removeX402Site = (payerId: string, agentId: string, site: string) =>
+  oneYoctoCall(payerId, "remove_x402_site", { agent_id: agentId, site });
+
+export function approveX402Agent(payerId: string, agentId: string, payee: X402AgentInput): WalletTransaction {
+  const { registry, agent_id, ...rest } = wireAgent(payee);
+  return oneYoctoCall(payerId, "approve_x402_agent", { agent_id: agentId, registry, payee_agent_id: agent_id, ...rest });
+}
+/** `payee` is `<agent_id>@<registry>`. */
+export const removeX402Agent = (payerId: string, agentId: string, payee: string) =>
+  oneYoctoCall(payerId, "remove_x402_agent", { agent_id: agentId, payee });
 
 export const approveX402Seller = (payerId: string, agentId: string, seller: string, limit: X402LimitInput) =>
   oneYoctoCall(payerId, "approve_x402_seller", { agent_id: agentId, seller, ...wireLimit(limit) });
@@ -454,6 +502,17 @@ export const removeX402Seller = (payerId: string, agentId: string, seller: strin
   oneYoctoCall(payerId, "remove_x402_seller", { agent_id: agentId, seller });
 export const removeX402Rules = (payerId: string, agentId: string) =>
   oneYoctoCall(payerId, "remove_x402_rules", { agent_id: agentId });
+
+/** Storage deposit for registering an account with a NEP-145 token. The token refunds what it does not need. */
+export const TOKEN_STORAGE_DEPOSIT = parseNear("0.0125");
+
+/**
+ * Registers `accountId` with a token (NEP-145 `storage_deposit`), so it can
+ * receive it. A seller's account must be registered to be paid in USDC.
+ */
+export function registerWithToken(token: string, accountId: string, deposit = TOKEN_STORAGE_DEPOSIT): WalletTransaction {
+  return { receiverId: token, actions: [call("storage_deposit", { account_id: accountId, registration_only: true }, deposit)] };
+}
 
 /**
  * Prepares a connected key's x402 payment account (its implicit account):
@@ -482,3 +541,122 @@ export const pausePayments = (payerId: string) => oneYoctoCall(payerId, "pause")
 export const resumePayments = (payerId: string) => oneYoctoCall(payerId, "resume");
 export const setAccountDailyCap = (payerId: string, cap: bigint | null) =>
   oneYoctoCall(payerId, "set_account_daily_cap", { cap: cap === null ? null : cap.toString() });
+
+// ------------------------------------------------------------------ installing and upgrading code
+
+const UPGRADE_GAS = 300n * TGAS;
+
+function base64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+function assertEd25519(publicKey: string) {
+  if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(publicKey)) throw new Error("Expected an ed25519 public key");
+}
+
+function fullAccessKey(publicKey: string): WalletAction {
+  assertEd25519(publicKey);
+  return { type: "AddKey", params: { publicKey, accessKey: { permission: "FullAccess" } } };
+}
+
+/**
+ * Replaces the policy's code on the owner's account with an ordinary owner call
+ * (`upgrade_code`), so wallets that refuse a contract deployment can still sign
+ * it. The new code must read the existing state, or the upgrade is rolled back.
+ * Needs a policy that already has `upgrade_code`.
+ */
+export function upgradePolicyCode(ownerId: string, code: Uint8Array): WalletTransaction {
+  return { receiverId: ownerId, actions: [call("upgrade_code", { code: base64(code) }, ONE_YOCTO, UPGRADE_GAS)] };
+}
+
+/** The same for the owner's registry, unless its code was frozen. */
+export function upgradeRegistryCode(registryId: string, code: Uint8Array): WalletTransaction {
+  return { receiverId: registryId, actions: [call("upgrade_code", { code: base64(code) }, ONE_YOCTO, UPGRADE_GAS)] };
+}
+
+/** Gives up registry code upgrades for good. */
+export const freezeRegistryCode = (registryId: string) => oneYoctoCall(registryId, "freeze_code");
+
+/*
+ * Installing code with a one-time setup key, for wallets that refuse to sign a
+ * contract deployment:
+ *   1. The wallet signs `grantSetupKey` (or `createAccountWithSetupKey` for the
+ *      registry). It adds a full-access key that the page generated.
+ *   2. The page signs `installRegistryWithSetupKey` or `installPolicyWithSetupKey`
+ *      with that key: deploy, initialize, and delete the key, in one transaction.
+ * The key exists only between the two transactions and never leaves the page.
+ * If step 2 cannot run, `removeSetupKey` deletes the key with the wallet.
+ */
+
+/** Step 1 for the policy: adds the page's setup key to the owner's account. */
+export function grantSetupKey(accountId: string, setupPublicKey: string): WalletTransaction {
+  return { receiverId: accountId, actions: [fullAccessKey(setupPublicKey)] };
+}
+
+/** Step 1 for the registry: creates `agents.<owner>`, funds its storage, and adds the page's setup key. */
+export function createAccountWithSetupKey(
+  parentId: string,
+  accountId: string,
+  setupPublicKey: string,
+  deposit = REGISTRY_DEPOSIT_DIRECT,
+): WalletTransaction {
+  if (!accountId.endsWith(`.${parentId}`)) throw new Error(`${accountId} must be a sub-account of ${parentId}`);
+  return {
+    receiverId: accountId,
+    actions: [{ type: "CreateAccount" }, { type: "Transfer", params: { deposit: deposit.toString() } }, fullAccessKey(setupPublicKey)],
+  };
+}
+
+/** Step 2 for the registry, signed by the setup key: deploy, set the owner, delete the key. No key is left on it. */
+export function installRegistryWithSetupKey(registryId: string, ownerId: string, code: Uint8Array, setupPublicKey: string): WalletTransaction {
+  return {
+    receiverId: registryId,
+    actions: [
+      { type: "DeployContract", params: { code } },
+      call("new", { owner: ownerId }, 0n, INIT_GAS),
+      { type: "DeleteKey", params: { publicKey: setupPublicKey } },
+    ],
+  };
+}
+
+/** Step 2 for the policy, signed by the setup key: deploy, initialize with the registry, delete the key. */
+export function installPolicyWithSetupKey(
+  ownerId: string,
+  registryId: string,
+  code: Uint8Array,
+  setupPublicKey: string,
+  accountDailyCap?: bigint | null,
+): WalletTransaction {
+  return {
+    receiverId: ownerId,
+    actions: [
+      { type: "DeployContract", params: { code } },
+      call("initialize", { registry: registryId, account_daily_cap: accountDailyCap?.toString() ?? null }, 0n, INIT_GAS),
+      { type: "DeleteKey", params: { publicKey: setupPublicKey } },
+    ],
+  };
+}
+
+/**
+ * Step 2 for upgrading a policy that predates `upgrade_code`, signed by the
+ * setup key: deploy the new code, check that it reads the existing state
+ * (`get_revision`), and delete the key. A failed check rolls the whole
+ * transaction back, old code included.
+ */
+export function upgradePolicyWithSetupKey(ownerId: string, code: Uint8Array, setupPublicKey: string): WalletTransaction {
+  return {
+    receiverId: ownerId,
+    actions: [
+      { type: "DeployContract", params: { code } },
+      call("get_revision", {}, 0n, 10n * TGAS),
+      { type: "DeleteKey", params: { publicKey: setupPublicKey } },
+    ],
+  };
+}
+
+/** Deletes a setup key left behind, with the wallet. */
+export function removeSetupKey(accountId: string, setupPublicKey: string): WalletTransaction {
+  return { receiverId: accountId, actions: [{ type: "DeleteKey", params: { publicKey: setupPublicKey } }] };
+}

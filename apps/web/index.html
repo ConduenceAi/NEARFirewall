@@ -11,12 +11,7 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400..700&family=DM+Serif+Text:ital@0;1&family=Geist:wght@400..700&family=IBM+Plex+Mono:wght@400;500&display=swap"
       rel="stylesheet"
     />
-    <script>
-      try {
-        var t = localStorage.getItem("nearfirewall-theme");
-        if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
-      } catch (e) {}
-    </script>
+    <script>document.documentElement.dataset.theme = "light";</script>
   </head>
   <body>
     <div id="root"></div>

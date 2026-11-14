@@ -21,6 +21,19 @@ import {
   x402Capability,
   USDC_CONTRACT,
   describeReason,
+  NearRpc,
+  approveX402Agent,
+  approveX402Site,
+  checkRegistry,
+  createAccountWithSetupKey,
+  grantSetupKey,
+  installPolicyWithSetupKey,
+  installRegistryWithSetupKey,
+  registerWithToken,
+  removeX402Agent,
+  upgradePolicyCode,
+  upgradePolicyWithSetupKey,
+  upgradeRegistryCode,
 } from "../src/index.ts";
 
 const argsOf = (tx: { actions: { type: string; params?: unknown }[] }, i = 0) =>
@@ -146,5 +159,89 @@ describe("x402 owner transactions", () => {
     ]);
     expect(argsOf(setupX402Account("alice.testnet", publicKey)).args).toEqual({ public_key: publicKey });
     expect(() => setupX402Account("alice.testnet", "secp256k1:abc")).toThrow();
+  });
+});
+
+describe("x402 websites and agents", () => {
+  it("sends the site and the claimed agent with an X402Pay action, only when set", () => {
+    const base = { type: "X402Pay" as const, asset: "usdc.testnet", pay_to: "bob.testnet", amount: 1n };
+    expect(toWireAction(base)).not.toHaveProperty("site");
+    expect(toWireAction({ ...base, site: "api.example.com", payee_agent: { registry: "agents.bob.testnet", agent_id: "7" } })).toMatchObject({
+      site: "api.example.com",
+      payee_agent: { registry: "agents.bob.testnet", agent_id: "7" },
+    });
+  });
+
+  it("approves websites and agents one by one", () => {
+    expect(argsOf(approveX402Site("alice.testnet", "1", { site: "api.example.com", payTo: "example.testnet", perPaymentCap: 1n, dailyCap: 2n })).args).toEqual({
+      agent_id: "1",
+      site: "api.example.com",
+      per_payment_cap: "1",
+      daily_cap: "2",
+      pay_to: "example.testnet",
+    });
+    expect(argsOf(approveX402Agent("alice.testnet", "1", { registry: "agents.bob.testnet", agentId: "7", generation: 3n, perPaymentCap: 1n, dailyCap: 2n })).args).toEqual({
+      agent_id: "1",
+      registry: "agents.bob.testnet",
+      payee_agent_id: "7",
+      per_payment_cap: "1",
+      daily_cap: "2",
+      generation: 3,
+    });
+    expect(argsOf(removeX402Agent("alice.testnet", "1", "7@agents.bob.testnet")).args).toEqual({ agent_id: "1", payee: "7@agents.bob.testnet" });
+  });
+
+  it("registers an account with a token", () => {
+    const tx = registerWithToken(USDC_CONTRACT.testnet, "bob.testnet");
+    expect(tx.receiverId).toBe(USDC_CONTRACT.testnet);
+    expect(argsOf(tx).args).toEqual({ account_id: "bob.testnet", registration_only: true });
+  });
+});
+
+describe("installing code without a deployment in the wallet", () => {
+  const key = KeyPair.fromRandom("ed25519").getPublicKey().toString();
+  const code = new Uint8Array([0, 97, 115, 109, 1]);
+  const kinds = (tx: { actions: { type: string; params?: any }[] }) =>
+    tx.actions.map((a) => (a.type === "FunctionCall" ? a.params.methodName : a.type === "AddKey" ? `AddKey:${JSON.stringify(a.params.accessKey.permission)}` : a.type));
+
+  it("lets the wallet sign only a key, and the key install and delete itself", () => {
+    expect(kinds(grantSetupKey("alice.testnet", key))).toEqual(['AddKey:"FullAccess"']);
+    expect(kinds(createAccountWithSetupKey("alice.testnet", "agents.alice.testnet", key))).toEqual(["CreateAccount", "Transfer", 'AddKey:"FullAccess"']);
+    const registry = installRegistryWithSetupKey("agents.alice.testnet", "alice.testnet", code, key);
+    expect(kinds(registry)).toEqual(["DeployContract", "new", "DeleteKey"]);
+    expect(registry.actions[2]).toEqual({ type: "DeleteKey", params: { publicKey: key } });
+    const policy = installPolicyWithSetupKey("alice.testnet", "agents.alice.testnet", code, key, 5n);
+    expect(kinds(policy)).toEqual(["DeployContract", "initialize", "DeleteKey"]);
+    expect(kinds(upgradePolicyWithSetupKey("alice.testnet", code, key))).toEqual(["DeployContract", "get_revision", "DeleteKey"]);
+    expect(() => createAccountWithSetupKey("alice.testnet", "agents.bob.testnet", key)).toThrow("sub-account");
+    expect(() => grantSetupKey("alice.testnet", "secp256k1:abc")).toThrow();
+  });
+
+  it("upgrades through the contracts' own upgrade_code, with the code as base64", () => {
+    const tx = upgradePolicyCode("alice.testnet", code);
+    expect(tx.receiverId).toBe("alice.testnet");
+    expect(argsOf(tx)).toMatchObject({ methodName: "upgrade_code", deposit: "1" });
+    expect(argsOf(tx).args).toEqual({ code: Buffer.from(code).toString("base64") });
+    expect(upgradeRegistryCode("agents.alice.testnet", code).receiverId).toBe("agents.alice.testnet");
+  });
+
+  it("reports an owner's older registry as outdated, and whether it can upgrade itself", async () => {
+    const view = (result: unknown) => ({ result: Array.from(new TextEncoder().encode(JSON.stringify(result))) });
+    const rpc = (upgradable: boolean) =>
+      new NearRpc("http://rpc.invalid", (async (_u: string, init: { body: string }) => {
+        const { id, params } = JSON.parse(init.body);
+        let result: unknown;
+        if (params.request_type === "view_account") result = { amount: "0", locked: "0", code_hash: "OldHash", storage_usage: 1 };
+        else if (params.request_type === "view_access_key_list") result = { keys: [] };
+        else if (params.method_name === "get_owner") result = view("alice.testnet");
+        else if (params.method_name === "is_code_frozen") {
+          if (!upgradable) return new Response(JSON.stringify({ jsonrpc: "2.0", id, error: { message: "MethodNotFound" } }));
+          result = view(false);
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id, result }));
+      }) as unknown as typeof fetch);
+    expect(await checkRegistry(rpc(true), "agents.alice.testnet", "alice.testnet", "NewHash")).toEqual({ kind: "outdated", codeHash: "OldHash", upgradable: true });
+    expect(await checkRegistry(rpc(false), "agents.alice.testnet", "alice.testnet", "NewHash")).toEqual({ kind: "outdated", codeHash: "OldHash", upgradable: false });
+    expect(await checkRegistry(rpc(true), "agents.alice.testnet", "mallory.testnet", "NewHash")).toMatchObject({ kind: "untrusted" });
   });
 });

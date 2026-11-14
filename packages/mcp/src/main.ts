@@ -9,6 +9,8 @@
  *   NEARFIREWALL_RPC_URL    optional RPC endpoint
  *   NEARFIREWALL_MAX_PAYMENT optional local ceiling per payment, in NEAR
  *   NEARFIREWALL_MAX_X402    optional local ceiling per x402 payment, in USDC
+ *   NEARFIREWALL_ALLOW_LOCAL_FETCH  set to 1 only for a local demo: lets fetch_url and
+ *                            fetch_paid reach localhost and private addresses
  *
  * x402 payments use the same key: it also controls the key's x402 payment
  * account, which the owner's policy funds one payment at a time.
@@ -58,6 +60,9 @@ const connection = new AgentConnection({
 
 const x402 = new X402Buyer({ connection, secretKey: secret as KeyPairString, network, rpc, maxPayment: maxX402 });
 
-const server = createServer(connection, { maxPayment, x402 });
+const allowLocal = env.NEARFIREWALL_ALLOW_LOCAL_FETCH === "1";
+if (allowLocal) console.error("nearfirewall-mcp: NEARFIREWALL_ALLOW_LOCAL_FETCH=1, so local and private addresses can be fetched. Use only for a local demo.");
+
+const server = createServer(connection, { maxPayment, x402, ...(allowLocal ? { fetchOptions: { allowPrivate: true } } : {}) });
 await server.connect(new StdioServerTransport());
 console.error(`nearfirewall-mcp: ready for ${account} (${network}), key ${publicKey.slice(0, 16)}…`);

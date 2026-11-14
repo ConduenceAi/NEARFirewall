@@ -1054,6 +1054,8 @@ fn x402_pay(seller: &str, cents: u128) -> Action {
         asset: acc("usdc.testnet"),
         pay_to: acc(seller),
         amount: U128(cents * USDC / 100),
+        site: None,
+        payee_agent: None,
     }
 }
 
@@ -1220,4 +1222,80 @@ fn x402_capability_changes_need_the_holders_full_access_key() {
     );
     call(&alice(), 0, T0);
     r.set_x402_capability("1".into(), x402_cap(20));
+}
+
+#[test]
+fn x402_labels_are_checked_and_kept_out_of_the_log() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent(
+        "trader".into(),
+        None,
+        caps(3),
+        None,
+        None,
+        None,
+        x402_cap(10),
+    );
+    let labelled = |site: &str| Action::X402Pay {
+        asset: acc("usdc.testnet"),
+        pay_to: acc("seller.testnet"),
+        amount: U128(USDC / 100),
+        site: Some(site.into()),
+        payee_agent: Some(nearfirewall_types::AgentRef {
+            registry: acc("agents.bob.testnet"),
+            agent_id: "7".into(),
+        }),
+    };
+    call(&alice(), 0, T0);
+    assert_eq!(
+        reason_of_auth(r.authorize("1".into(), labelled("api.example.com"), rid(1))),
+        None
+    );
+    // The log keeps who was paid and how much, not the labels.
+    assert_eq!(
+        r.get_activity("1".into(), None)[0].action,
+        x402_pay("seller.testnet", 1)
+    );
+    assert_eq!(
+        reason_of_auth(r.authorize("1".into(), labelled("https://evil.com/x"), rid(2))),
+        Some(Reason::InvalidRequest)
+    );
+}
+
+// ---------------------------------------------------------------- code upgrades
+
+#[test]
+fn the_owner_can_upgrade_the_code_from_a_wallet_call() {
+    let mut r = setup();
+    call(&alice(), 1, T0);
+    let _ = r.upgrade_code(vec![0, 97, 115, 109].into());
+    assert!(!r.is_code_frozen());
+}
+
+#[test]
+#[should_panic(expected = "Only the registry's owner can upgrade it")]
+fn only_the_owner_upgrades_the_code() {
+    let mut r = setup();
+    call(&bob(), 1, T0);
+    let _ = r.upgrade_code(vec![1].into());
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn code_upgrades_need_a_full_access_key() {
+    let mut r = setup();
+    call(&alice(), 0, T0);
+    let _ = r.upgrade_code(vec![1].into());
+}
+
+#[test]
+#[should_panic(expected = "This registry's code is frozen")]
+fn frozen_code_cannot_be_upgraded() {
+    let mut r = setup();
+    call(&alice(), 1, T0);
+    r.freeze_code();
+    assert!(r.is_code_frozen());
+    call(&alice(), 1, T0);
+    let _ = r.upgrade_code(vec![1].into());
 }

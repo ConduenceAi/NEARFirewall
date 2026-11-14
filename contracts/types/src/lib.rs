@@ -49,7 +49,51 @@ pub enum Action {
         asset: AccountId,
         pay_to: AccountId,
         amount: U128,
+        /// The website that asked for payment: the host of the URL the agent's
+        /// client fetched, such as `api.example.com`. Reported by the client.
+        #[serde(default)]
+        site: Option<String>,
+        /// The NEARFirewall agent the seller says it is. The policy checks on-chain
+        /// that `pay_to` holds it before paying under an agent approval.
+        #[serde(default)]
+        payee_agent: Option<AgentRef>,
     },
+}
+
+/// An agent in some registry: which contract, and which token.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AgentRef {
+    pub registry: AccountId,
+    pub agent_id: AgentId,
+}
+
+impl AgentRef {
+    /// The key x402 rules use for this agent: `<agent_id>@<registry>`.
+    pub fn key(&self) -> String {
+        format!("{}@{}", self.agent_id, self.registry)
+    }
+}
+
+/// Longest website name an x402 request or rule may carry.
+pub const MAX_SITE_BYTES: usize = 128;
+
+/// A website as x402 rules name it: a lowercase host, optionally with a port,
+/// such as `api.example.com` or `localhost:8080`.
+pub fn is_valid_site(site: &str) -> bool {
+    let (host, port) = match site.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (site, None),
+    };
+    !host.is_empty()
+        && site.len() <= MAX_SITE_BYTES
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-')
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-'])
+        && port
+            .is_none_or(|p| !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl Action {
@@ -69,6 +113,44 @@ impl Action {
 
     pub fn is_x402(&self) -> bool {
         matches!(self, Action::X402Pay { .. })
+    }
+
+    /// Checks fields a contract stores or matches on. An x402 site must be a
+    /// plain host name, and an agent ID must be a decimal token ID.
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Action::TransferNear { .. } => true,
+            Action::X402Pay {
+                site, payee_agent, ..
+            } => {
+                site.as_deref().is_none_or(is_valid_site)
+                    && payee_agent.as_ref().is_none_or(|a| {
+                        !a.agent_id.is_empty()
+                            && a.agent_id.len() <= 20
+                            && a.agent_id.bytes().all(|b| b.is_ascii_digit())
+                    })
+            }
+        }
+    }
+
+    /// The action without the x402 labels (site and seller agent), for logs
+    /// that only need who was paid and how much.
+    pub fn without_labels(&self) -> Action {
+        match self {
+            Action::X402Pay {
+                asset,
+                pay_to,
+                amount,
+                ..
+            } => Action::X402Pay {
+                asset: asset.clone(),
+                pay_to: pay_to.clone(),
+                amount: *amount,
+                site: None,
+                payee_agent: None,
+            },
+            other => other.clone(),
+        }
     }
 }
 
@@ -265,6 +347,11 @@ pub enum Reason {
     AssetNotAccepted,
     /// The shared daily budget for sellers the owner has not listed is used up.
     UnlistedDailyCap,
+    /// The seller claimed an approved agent, but the account to pay does not hold
+    /// it now, or the agent changed hands since the owner approved it.
+    AgentPayeeMismatch,
+    /// The website asked to be paid at an account other than the one the owner pinned.
+    SitePayeeMismatch,
 }
 
 impl Reason {
@@ -307,6 +394,8 @@ impl Reason {
             Reason::X402NotEnabled => "X402_NOT_ENABLED",
             Reason::AssetNotAccepted => "ASSET_NOT_ACCEPTED",
             Reason::UnlistedDailyCap => "UNLISTED_DAILY_CAP",
+            Reason::AgentPayeeMismatch => "AGENT_PAYEE_MISMATCH",
+            Reason::SitePayeeMismatch => "SITE_PAYEE_MISMATCH",
         }
     }
 }
@@ -391,6 +480,8 @@ mod tests {
             Reason::X402NotEnabled,
             Reason::AssetNotAccepted,
             Reason::UnlistedDailyCap,
+            Reason::AgentPayeeMismatch,
+            Reason::SitePayeeMismatch,
         ] {
             let json = near_sdk::serde_json::to_string(&reason).unwrap();
             assert_eq!(json, format!("\"{}\"", reason.code()));
@@ -418,6 +509,47 @@ mod tests {
         };
         assert_eq!(near_sdk::borsh::to_vec(&near).unwrap()[0], 0);
         assert_eq!(near_sdk::borsh::to_vec(&action).unwrap()[0], 1);
+    }
+
+    #[test]
+    fn x402_labels() {
+        let action: Action = near_sdk::serde_json::from_str(
+            r#"{"type":"X402Pay","asset":"usdc.testnet","pay_to":"seller.testnet","amount":"5",
+                "site":"api.example.com","payee_agent":{"registry":"agents.bob.testnet","agent_id":"7"}}"#,
+        )
+        .unwrap();
+        assert!(action.is_well_formed());
+        let Action::X402Pay { payee_agent, .. } = &action else {
+            panic!()
+        };
+        assert_eq!(payee_agent.as_ref().unwrap().key(), "7@agents.bob.testnet");
+        assert_eq!(
+            action.without_labels(),
+            Action::X402Pay {
+                asset: "usdc.testnet".parse().unwrap(),
+                pay_to: "seller.testnet".parse().unwrap(),
+                amount: U128(5),
+                site: None,
+                payee_agent: None,
+            }
+        );
+        for ok in ["api.example.com", "localhost:8080", "a-b.c1.io"] {
+            assert!(is_valid_site(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "API.example.com",
+            "https://a.com",
+            "a.com/path",
+            ".a.com",
+            "a.com:",
+            "a.com:123456",
+            "a b.com",
+        ] {
+            assert!(!is_valid_site(bad), "{bad}");
+        }
+        let long = format!("{}.com", "a".repeat(MAX_SITE_BYTES));
+        assert!(!is_valid_site(&long));
     }
 
     #[test]

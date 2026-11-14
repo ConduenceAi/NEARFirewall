@@ -258,9 +258,57 @@ describe("x402 buyer template", () => {
       dailyCap: parseUsdc("2"),
       sellers: [{ seller: "data-agent.testnet", perPaymentCap: parseUsdc("0.5"), dailyCap: parseUsdc("1") }],
       unlisted: { perPaymentCap: parseUsdc("0.05"), dailyCap: parseUsdc("0.25") },
+      sites: [],
+      agents: [],
     });
     expect(validatePlan(plan, ctx)).toEqual({ ok: true, issues: [] });
     expect(getTemplate("x402-buyer")).toBe(x402Buyer);
+  });
+
+  it("approves websites and agents, and pins each agent to its holder when signed", async () => {
+    const plan = buildPlan(
+      x402Buyer,
+      {
+        ...input,
+        sites: [{ site: "api.example.com", perPayment: "0.1", daily: "0.5", payTo: "example.testnet" }],
+        agents: [{ registry: "agents.bob.testnet", agentId: "7", perPayment: "0.5", daily: "2" }],
+      },
+      ctx,
+    );
+    expect(validatePlan(plan, ctx).ok).toBe(true);
+    const step = plan.steps.at(-1)!;
+    if (step.kind !== "set_x402_rules") throw new Error();
+    const rpc = {} as NearRpc;
+    const registry = {
+      rpc,
+      resolve: async () => ({ agent_id: "1" }),
+    } as unknown as RegistryClient;
+    // The payee registry is read through a client on the same RPC.
+    const original = RegistryClient.prototype.getAgent;
+    RegistryClient.prototype.getAgent = async function (this: RegistryClient, id: string) {
+      expect(this.registryId).toBe("agents.bob.testnet");
+      return { agent_id: id, generation: 5n } as never;
+    };
+    try {
+      const tx = await toTransaction(step, ctx, registry);
+      const action = tx.actions[0]!;
+      if (action.type !== "FunctionCall") throw new Error();
+      expect(action.params.args.sites).toEqual([{ site: "api.example.com", per_payment_cap: "100000", daily_cap: "500000", pay_to: "example.testnet" }]);
+      expect(action.params.args.agents).toEqual([
+        { registry: "agents.bob.testnet", agent_id: "7", per_payment_cap: "500000", daily_cap: "2000000", generation: 5 },
+      ]);
+    } finally {
+      RegistryClient.prototype.getAgent = original;
+    }
+  });
+
+  it("refuses malformed websites and agent IDs", () => {
+    const plan = buildPlan(x402Buyer, input, ctx);
+    const rules = plan.steps.at(-1)!;
+    if (rules.kind !== "set_x402_rules") throw new Error();
+    rules.rules.sites = [{ site: "https://a.com/x", perPaymentCap: 1n, dailyCap: 1n }];
+    rules.rules.agents = [{ registry: "agents.bob.testnet", agentId: "seven", perPaymentCap: 1n, dailyCap: 1n }];
+    expect(codes(plan)).toEqual(expect.arrayContaining(["INVALID_LABEL"]));
   });
 
   it("can refuse unlisted sellers and skip turning x402 on", () => {

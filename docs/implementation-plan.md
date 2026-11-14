@@ -105,9 +105,16 @@ The account holds nothing between payments, so a stolen key can take at most the
 | X3 | SDK (`x402.ts`, builders, `AgentConnection.x402Rules`, `fundX402`, `previewX402`) and `@nearfirewall/x402` (wire format, delegate signing, `X402Buyer`, `createPaywall`, facilitator client) | Done. The delegate signature is verified in tests, and the buyer and paywall run end to end against a mocked chain and facilitator. |
 | X4 | MCP `fetch_paid` and `return_unspent_usdc`, x402 lines in `get_rules`; gateway `POST /api/x402/fetch` with one payment at a time per key | Done, tested with mocks |
 | X5 | App: x402 section under Payments, the x402 cap at registration, USDC amounts in Activity and the inspector; **x402 buyer** template | Built and type-checked. Not tried in a browser. |
-| X6 | Testnet: fresh owner account (registries without keys cannot be upgraded), Testnet USDC, a facilitator API key or a self-hosted facilitator, one paid request between two agents | Not started |
+| X6 | Testnet: fresh owner accounts, Testnet USDC, the local facilitator, one paid request between two agents | Not started. Scripted by X8. |
+| X7 | Payees beyond accounts. **Agents**: approved by NFT (`<agent_id>@<registry>`); the seller claims it in its terms, and the policy reads the seller's registry before it pays. The account paid must hold the agent, the agent must be active, and its generation must match the one approved. The amount is reserved before the check, and a failed check releases it. **Websites**: approved by host, reported by the client, optionally pinned to a payee account. Rule order: agent, account, website, unlisted pool. | Done. Contract unit tests cover each mismatch case and the release; the buyer sends the labels. |
+| X8 | Demo tooling: `x402-facilitator.ts` (a NEAR exact-scheme facilitator; the relayer pays gas), `x402-seller.ts` (paid endpoints on three ports), and `x402-demo.ts` (sets up two CLI owners) | Done. The facilitator is unit-tested, and buyer, paywall, and facilitator run together over HTTP. The two servers were started locally and answered correctly. |
+| X9 | Install without a wallet deployment: a one-time setup key for the registry and the policy (the wallet signs only an AddKey; the page installs and deletes the key in one transaction). Owner-only `upgrade_code` on both contracts, `freeze_code` on the registry, `get_features` on the policy, and an app upgrade card for older policies and registries. | Built, unit-tested, and the app builds. Not yet tried with Meteor: it is unknown whether Meteor signs a full-access AddKey. |
 
-Out of scope for now: "ask me first" for x402 (a seller waits seconds), seller identity checks beyond the seller's account, and reusing USDC left in a payment account (it is returned to the owner instead).
+Out of scope for now:
+- "Ask me first" for x402. A seller waits seconds, not hours.
+- Lists of trusted merchants kept by someone else.
+- Reusing USDC left in a payment account. It is returned to the owner instead.
+- `set_registry`, which would let a policy move to a new registry. Generations are unique only per registry, so this needs a registry epoch on mandates (F2).
 
 ### R1: user-owned registry
 

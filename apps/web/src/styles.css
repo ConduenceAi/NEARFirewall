@@ -13,34 +13,19 @@
 }
 
 :root,
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --bg: #000;
-  --panel: #121212;
-  --surface: #191919;
-  --surface-2: #242424;
-  --border: #303030;
-  --text: #f4f4f4;
-  --muted: #adadad;
-  --ok-text: #c7f96f;
-  --info-text: #abd5f0;
-  --danger-text: #ff9f90;
-  --header: #000;
-}
-
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg: #f5f5f5;
-  --panel: #fafafa;
-  --surface: #ededed;
-  --surface-2: #e4e4e4;
-  --border: #d2d2d2;
+  --bg: #f7f7f8;
+  --panel: #fcfcfc;
+  --surface: #efeff0;
+  --surface-2: #e6e6e8;
+  --border: #d9d9dc;
   --text: #202020;
   --muted: #565656;
   --ok-text: #395d13;
   --info-text: #225a7a;
   --danger-text: #a63b2d;
-  --header: #f8f8f8;
+  --header: #fafafa;
 }
 
 * { box-sizing: border-box; }

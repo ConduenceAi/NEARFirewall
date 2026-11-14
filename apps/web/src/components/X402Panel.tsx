@@ -1,13 +1,18 @@
 import { useState, type FormEvent } from "react";
 import {
   USDC_CONTRACT,
+  RegistryClient,
+  approveX402Agent,
   approveX402Seller,
+  approveX402Site,
   formatUsdc,
   ftBalanceOf,
   isTokenRegistered,
   parseUsdc,
+  removeX402Agent,
   removeX402Rules,
   removeX402Seller,
+  removeX402Site,
   setMandate,
   setX402Capability,
   setX402Config,
@@ -24,8 +29,10 @@ import {
 import { config, explorerAccount, rpc } from "../config.ts";
 import { useAsync } from "../hooks.ts";
 import { useWorkspaceRegistry } from "../workspace-registry.tsx";
+import { PolicyUpgrade } from "./PolicyUpgrade.tsx";
 
 type Execute = (label: string, tx: WalletTransaction | (() => WalletTransaction | Promise<WalletTransaction>)) => Promise<boolean>;
+type Run = (label: string, fn: () => Promise<unknown>) => Promise<boolean>;
 
 const usdc = (units: bigint) => `${formatUsdc(units)} USDC`;
 const usdcPattern = "\\d+(\\.\\d{1,6})?";
@@ -37,17 +44,12 @@ const DEFAULT_UNLISTED = { per: "0.05", daily: "0.25" };
  * x402 on the owner's account: the account-wide switch, then each agent's
  * x402 limits and each connection's payment account.
  */
-export function X402Section({ policy, agents, busy, exec }: { policy: PolicyClient; agents: AgentView[]; busy: boolean; exec: Execute }) {
-  const status = useAsync(() => policy.x402Status(), [policy.payerId, busy]);
+export function X402Section({ policy, agents, busy, exec, run }: { policy: PolicyClient; agents: AgentView[]; busy: boolean; exec: Execute; run: Run }) {
+  const status = useAsync(async () => ({ ...(await policy.x402Status()), features: await policy.features() }), [policy.payerId, busy]);
   if (status.error) return <p className="notice error">Could not read the x402 settings. {status.error}</p>;
   if (!status.data) return null;
   if (!status.data.supported) {
-    return (
-      <section className="card" aria-labelledby="x402-title">
-        <h3 id="x402-title">x402 payments (USDC)</h3>
-        <p className="hint">The payment policy on this account was installed before x402. Upgrade it to the current policy to let agents pay x402 sellers.</p>
-      </section>
-    );
+    return <PolicyUpgrade accountId={policy.payerId} features={status.data.features} busy={busy} exec={exec} run={run} />;
   }
   const cfg = status.data.config;
   return (
@@ -114,6 +116,16 @@ function X402AgentCard({ agent, cfg, policy, busy, exec }: { agent: AgentView; c
     const sellerUsage = new Map(
       await Promise.all(Object.keys(rules?.sellers ?? {}).map(async (s) => [s, (await policy.getX402Usage(agent.agent_id, s)).seller_used_today ?? 0n] as const)),
     );
+    const siteUsage = new Map(
+      await Promise.all(
+        Object.keys(rules?.sites ?? {}).map(async (s) => [s, (await policy.getX402Usage(agent.agent_id, undefined, { site: s })).site_used_today ?? 0n] as const),
+      ),
+    );
+    const payeeUsage = new Map(
+      await Promise.all(
+        Object.keys(rules?.agents ?? {}).map(async (p) => [p, (await policy.getX402Usage(agent.agent_id, undefined, { payee: p })).payee_used_today ?? 0n] as const),
+      ),
+    );
     const accounts = await Promise.all(
       connections.map(async (c) => {
         let account: string | null = null;
@@ -128,7 +140,7 @@ function X402AgentCard({ agent, cfg, policy, busy, exec }: { agent: AgentView; c
         return { connection: c, account, ready, unspent };
       }),
     );
-    return { mandate, rules, usage, sellerUsage, accounts };
+    return { mandate, rules, usage, sellerUsage, siteUsage, payeeUsage, accounts };
   }, [agent.agent_id, cfg.asset, busy]);
   const [cap, setCap] = useState("");
 
@@ -197,6 +209,60 @@ function X402AgentCard({ agent, cfg, policy, busy, exec }: { agent: AgentView; c
             </tbody>
           </table>
           {editable && <SellerForm agentId={agent.agent_id} payer={payer} busy={busy} exec={exec} />}
+
+          <h4>Approved agents</h4>
+          <p className="hint">
+            Pay another agent by its NFT. Before each payment, the policy checks that registry on-chain: the account being paid must hold that agent
+            now, and if the agent has changed hands since you approved it, payment is refused.
+          </p>
+          {Object.keys(d.rules.agents).length > 0 && (
+            <table>
+              <thead>
+                <tr><th>Agent</th><th>Per payment</th><th>Daily</th><th>Used today</th><th /></tr>
+              </thead>
+              <tbody>
+                {Object.entries(d.rules.agents).map(([payee, rule]) => (
+                  <tr key={payee}>
+                    <td>
+                      #{rule.agent_id} in <a href={explorerAccount(rule.registry)} target="_blank" rel="noreferrer">{rule.registry}</a>
+                      {rule.generation !== null && <span className="hint"> · generation {rule.generation.toString()}</span>}
+                    </td>
+                    <td>{usdc(rule.per_payment_cap)}</td>
+                    <td>{usdc(rule.daily_cap)}</td>
+                    <td>{usdc(d.payeeUsage.get(payee) ?? 0n)}</td>
+                    <td>{editable && <button disabled={busy} onClick={() => exec("Remove agent", removeX402Agent(payer, agent.agent_id, payee))}>Remove</button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {editable && <PayeeAgentForm agentId={agent.agent_id} payer={payer} busy={busy} exec={exec} />}
+
+          <h4>Approved websites</h4>
+          <p className="hint">
+            Pay a website by its address, such as <code>api.example.com</code>. Your agent's software reports which site asked for payment. Pin the
+            account it must be paid at, and the rule is enforced fully on-chain.
+          </p>
+          {Object.keys(d.rules.sites).length > 0 && (
+            <table>
+              <thead>
+                <tr><th>Website</th><th>Paid to</th><th>Per payment</th><th>Daily</th><th>Used today</th><th /></tr>
+              </thead>
+              <tbody>
+                {Object.entries(d.rules.sites).map(([site, rule]) => (
+                  <tr key={site}>
+                    <td>{site}</td>
+                    <td>{rule.pay_to ?? <span className="hint">any account the site names</span>}</td>
+                    <td>{usdc(rule.per_payment_cap)}</td>
+                    <td>{usdc(rule.daily_cap)}</td>
+                    <td>{usdc(d.siteUsage.get(site) ?? 0n)}</td>
+                    <td>{editable && <button disabled={busy} onClick={() => exec("Remove website", removeX402Site(payer, agent.agent_id, site))}>Remove</button>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {editable && <SiteForm agentId={agent.agent_id} payer={payer} busy={busy} exec={exec} />}
           {editable && (
             <button className="danger" disabled={busy} onClick={() => exec("Remove x402 limits", removeX402Rules(payer, agent.agent_id))}>
               Stop x402 for this agent
@@ -236,8 +302,16 @@ function RulesForm({ agent, payer, rules, busy, exec }: { agent: AgentView; paye
     void exec(rules ? "Update x402 limits" : "Set x402 limits", () =>
       setX402Rules(payer, agent.agent_id, {
         dailyCap: parseUsdc(daily),
-        // Keep the approved sellers: this form changes only the budgets.
+        // Keep every approval: this form changes only the budgets.
         sellers: Object.entries(rules?.sellers ?? {}).map(([seller, l]) => ({ seller, perPaymentCap: l.per_payment_cap, dailyCap: l.daily_cap })),
+        sites: Object.entries(rules?.sites ?? {}).map(([site, r]) => ({ site, payTo: r.pay_to, perPaymentCap: r.per_payment_cap, dailyCap: r.daily_cap })),
+        agents: Object.values(rules?.agents ?? {}).map((r) => ({
+          registry: r.registry,
+          agentId: r.agent_id,
+          generation: r.generation,
+          perPaymentCap: r.per_payment_cap,
+          dailyCap: r.daily_cap,
+        })),
         unlisted: allowUnlisted ? { perPaymentCap: parseUsdc(per), dailyCap: parseUsdc(unlistedDaily) } : null,
       }),
     );
@@ -253,6 +327,71 @@ function RulesForm({ agent, payer, rules, busy, exec }: { agent: AgentView; paye
         </>
       )}
       <button type="submit" disabled={busy}>{rules ? "Update x402 limits" : "Set x402 limits"}</button>
+    </form>
+  );
+}
+
+/** Approves another agent by its NFT, pinned to its current generation so a transfer voids it. */
+function PayeeAgentForm({ agentId, payer, busy, exec }: { agentId: string; payer: string; busy: boolean; exec: Execute }) {
+  const [registry, setRegistry] = useState("");
+  const [id, setId] = useState("");
+  const [per, setPer] = useState("");
+  const [daily, setDaily] = useState("");
+  return (
+    <form
+      className="inline"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void exec("Approve agent", async () => {
+          const payee = await new RegistryClient(rpc, registry.trim()).getAgent(id.trim());
+          if (!payee) throw new Error(`There is no agent #${id.trim()} in ${registry.trim()}.`);
+          if (payee.status.state !== "active") throw new Error(`Agent #${payee.agent_id} is ${payee.status.state}.`);
+          return approveX402Agent(payer, agentId, {
+            registry: registry.trim(),
+            agentId: payee.agent_id,
+            perPaymentCap: parseUsdc(per),
+            dailyCap: parseUsdc(daily),
+            generation: payee.generation,
+          });
+        });
+      }}
+    >
+      <input value={registry} onChange={(e) => setRegistry(e.target.value)} placeholder="agents.seller.testnet" aria-label="The agent's registry" required />
+      <input value={id} onChange={(e) => setId(e.target.value)} placeholder="agent ID, such as 7" aria-label="Agent ID" inputMode="numeric" pattern="\d{1,20}" required />
+      <input value={per} onChange={(e) => setPer(e.target.value)} placeholder="per payment, USDC" aria-label="Per payment (USDC)" inputMode="decimal" pattern={usdcPattern} required />
+      <input value={daily} onChange={(e) => setDaily(e.target.value)} placeholder="per day, USDC" aria-label="Per day (USDC)" inputMode="decimal" pattern={usdcPattern} required />
+      <button type="submit" disabled={busy}>Approve agent</button>
+    </form>
+  );
+}
+
+/** Approves a website by host, optionally pinned to the account it must be paid at. */
+function SiteForm({ agentId, payer, busy, exec }: { agentId: string; payer: string; busy: boolean; exec: Execute }) {
+  const [site, setSite] = useState("");
+  const [payTo, setPayTo] = useState("");
+  const [per, setPer] = useState("");
+  const [daily, setDaily] = useState("");
+  return (
+    <form
+      className="inline"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void exec("Approve website", () =>
+          approveX402Site(payer, agentId, {
+            // Accept a pasted link too: keep only the host.
+            site: (/^https?:\/\//i.test(site.trim()) ? new URL(site.trim()).host : site.trim()).toLowerCase(),
+            payTo: payTo.trim() || null,
+            perPaymentCap: parseUsdc(per),
+            dailyCap: parseUsdc(daily),
+          }),
+        );
+      }}
+    >
+      <input value={site} onChange={(e) => setSite(e.target.value)} placeholder="api.example.com" aria-label="Website" required />
+      <input value={payTo} onChange={(e) => setPayTo(e.target.value)} placeholder="paid to (optional)" aria-label="Account it must be paid at (optional)" />
+      <input value={per} onChange={(e) => setPer(e.target.value)} placeholder="per payment, USDC" aria-label="Per payment (USDC)" inputMode="decimal" pattern={usdcPattern} required />
+      <input value={daily} onChange={(e) => setDaily(e.target.value)} placeholder="per day, USDC" aria-label="Per day (USDC)" inputMode="decimal" pattern={usdcPattern} required />
+      <button type="submit" disabled={busy}>Approve website</button>
     </form>
   );
 }

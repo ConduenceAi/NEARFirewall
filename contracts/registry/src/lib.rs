@@ -27,7 +27,7 @@ use near_contract_standards::non_fungible_token::metadata::{
     NFTContractMetadata, NonFungibleTokenMetadataProvider, TokenMetadata, NFT_METADATA_SPEC,
 };
 use near_contract_standards::non_fungible_token::{NonFungibleToken, Token, TokenId};
-use near_sdk::json_types::{U128, U64};
+use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::store::LookupMap;
 use near_sdk::{
     assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas,
@@ -74,7 +74,12 @@ enum StorageKey {
     /// Each agent's x402 capability, outside `AgentRecord` so existing records
     /// keep their layout. Appended: never reorder.
     X402Caps,
+    /// Set once the owner gives up code upgrades. Appended: never reorder.
+    CodeFrozen,
 }
+
+/// Gas left for the new code's check after `upgrade_code` deploys it.
+const GAS_FOR_UPGRADE_CHECK: Gas = Gas::from_tgas(10);
 
 fn x402_cap_key(agent_id: &str) -> Vec<u8> {
     let mut key = StorageKey::X402Caps.into_storage_key();
@@ -664,6 +669,48 @@ impl Registry {
         settle_storage(initial, 0);
     }
 
+    // ------------------------------------------------------------ code
+
+    /// Replaces this registry's code. Owner only, with 1 yoctoNEAR, so only a
+    /// full-access key of the owner can do it, from an ordinary wallet call.
+    /// The new code must read the existing state: the deploy and a call to
+    /// `get_owner` run as one batch, so code that cannot read it is rolled back.
+    /// Refused once `freeze_code` has been called.
+    #[payable]
+    pub fn upgrade_code(&mut self, code: Base64VecU8) -> Promise {
+        assert_one_yocto();
+        require!(
+            env::predecessor_account_id() == self.owner,
+            "Only the registry's owner can upgrade it"
+        );
+        require!(!Self::code_frozen(), "This registry's code is frozen");
+        require!(!code.0.is_empty(), "The code is empty");
+        Promise::new(env::current_account_id())
+            .deploy_contract(code.0)
+            .function_call(
+                "get_owner".to_string(),
+                b"{}".to_vec(),
+                NearToken::from_yoctonear(0),
+                GAS_FOR_UPGRADE_CHECK,
+            )
+    }
+
+    /// Gives up code upgrades for good. Holders and payers can then rely on the
+    /// code staying as it is, as with a registry that has no keys.
+    #[payable]
+    pub fn freeze_code(&mut self) {
+        assert_one_yocto();
+        require!(
+            env::predecessor_account_id() == self.owner,
+            "Only the registry's owner can freeze its code"
+        );
+        env::storage_write(&StorageKey::CodeFrozen.into_storage_key(), &[1]);
+    }
+
+    pub fn is_code_frozen(&self) -> bool {
+        Self::code_frozen()
+    }
+
     // ------------------------------------------------------------ execution
 
     /// Called by an agent's executor. Checks the agent and its whole path, then
@@ -686,7 +733,7 @@ impl Registry {
         if leaf.executor.as_ref() != Some(&caller) {
             return PromiseOrValue::Value(Outcome::denied(Reason::ExecutorMismatch));
         }
-        let check = if !is_valid_request_id(&request_id) {
+        let check = if !is_valid_request_id(&request_id) || !action.is_well_formed() {
             Err(Outcome::denied(Reason::InvalidRequest))
         } else if grant_id.is_some() {
             Err(Outcome::denied_with(
@@ -764,7 +811,7 @@ impl Registry {
             };
         };
         let payer = self.owner.clone();
-        let check = if is_valid_request_id(&request_id) {
+        let check = if is_valid_request_id(&request_id) && action.is_well_formed() {
             self.check_path(&agent_id, &leaf, &payer, &action)
         } else {
             Err(Outcome::denied(Reason::InvalidRequest))
@@ -969,6 +1016,10 @@ impl Registry {
         );
     }
 
+    fn code_frozen() -> bool {
+        env::storage_has_key(&StorageKey::CodeFrozen.into_storage_key())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn mint(
         &mut self,
@@ -1168,9 +1219,10 @@ impl Registry {
                 seq,
                 at: env::block_timestamp(),
                 payer: payer.clone(),
-                // Bounded so the reserved storage always covers the slot.
+                // Bounded so the reserved storage always covers the slot: the
+                // request ID is cut to 64 characters and x402 labels are left out.
                 request_id: request_id.chars().take(64).collect(),
-                action: action.clone(),
+                action: action.without_labels(),
                 outcome: outcome.to_string(),
                 reason,
             },

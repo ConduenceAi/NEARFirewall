@@ -19,9 +19,26 @@ export const X402BuyerInput = z.object({
   maxPerPayment: usdcAmount,
   /** Daily x402 budget across every seller. */
   dailyBudget: usdcAmount,
-  /** Sellers approved by name, each with its own limits. */
+  /** Seller accounts approved by name, each with its own limits. */
   sellers: z
     .array(z.object({ seller: accountId, perPayment: usdcAmount, daily: usdcAmount }))
+    .max(50)
+    .default([]),
+  /** Websites approved by host, such as api.example.com. `payTo` pins the account the site must be paid at. */
+  sites: z
+    .array(
+      z.object({
+        site: z.string().regex(/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/, "Enter a host such as api.example.com").max(128),
+        perPayment: usdcAmount,
+        daily: usdcAmount,
+        payTo: accountId.optional(),
+      }),
+    )
+    .max(50)
+    .default([]),
+  /** Other agents approved by their NFT. Each is pinned to its current holder when the plan is signed. */
+  agents: z
+    .array(z.object({ registry: accountId, agentId: z.string().regex(/^\d{1,20}$/, "An agent ID such as 7"), perPayment: usdcAmount, daily: usdcAmount }))
     .max(50)
     .default([]),
   /**
@@ -52,6 +69,8 @@ export const x402Buyer: Template<X402BuyerInput> = {
   defaults: {
     network: "testnet",
     sellers: [],
+    sites: [],
+    agents: [],
     unlisted: { perPayment: "0.05", daily: "0.25" },
     turnOnX402: true,
     nonTransferable: true,
@@ -86,6 +105,9 @@ export const x402Buyer: Template<X402BuyerInput> = {
         dailyCap: parseUsdc(input.dailyBudget),
         sellers: input.sellers.map((s) => ({ seller: s.seller, perPaymentCap: parseUsdc(s.perPayment), dailyCap: parseUsdc(s.daily) })),
         unlisted: input.unlisted ? { perPaymentCap: parseUsdc(input.unlisted.perPayment), dailyCap: parseUsdc(input.unlisted.daily) } : null,
+        sites: input.sites.map((s) => ({ site: s.site, payTo: s.payTo ?? null, perPaymentCap: parseUsdc(s.perPayment), dailyCap: parseUsdc(s.daily) })),
+        // The generation is read when the step is signed (see toTransaction).
+        agents: input.agents.map((a) => ({ registry: a.registry, agentId: a.agentId, perPaymentCap: parseUsdc(a.perPayment), dailyCap: parseUsdc(a.daily) })),
       },
     });
     return { templateId: this.id, templateVersion: this.version, title: `${this.title}: ${input.handle}`, steps };

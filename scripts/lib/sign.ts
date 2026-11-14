@@ -33,6 +33,7 @@ export function toNearActions(walletActions: WalletAction[]) {
         return actions.functionCall(a.params.methodName, a.params.args, BigInt(a.params.gas), BigInt(a.params.deposit));
       case "AddKey": {
         const p = a.params.accessKey.permission;
+        if (p === "FullAccess") return actions.addFullAccessKey(PublicKey.fromString(a.params.publicKey));
         return actions.addFunctionCallAccessKey(PublicKey.fromString(a.params.publicKey), p.receiverId, p.methodNames, BigInt(p.allowance));
       }
       case "DeleteKey":

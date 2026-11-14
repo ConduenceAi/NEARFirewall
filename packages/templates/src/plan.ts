@@ -13,9 +13,9 @@ import {
   setX402Config,
   setX402Rules,
   approveRecipient,
+  RegistryClient,
   type CapX402,
   type Capabilities,
-  type RegistryClient,
   type RecipientRuleInput,
   type WalletTransaction,
   type X402RulesInput,
@@ -145,7 +145,16 @@ export async function toTransaction(step: PlanStep, ctx: PlanContext, registry: 
       return setX402Config(ctx.payer, step.asset, step.accountDailyCap);
     case "set_x402_rules": {
       const agent = await agentOrThrow(registry, step.agentHandle);
-      return setX402Rules(ctx.payer, agent.agent_id, step.rules);
+      // Pin each approved agent to its current holder, so a later transfer voids the approval.
+      const agents = await Promise.all(
+        (step.rules.agents ?? []).map(async (a) => {
+          if (a.generation != null) return a;
+          const payee = await new RegistryClient(registry.rpc, a.registry).getAgent(a.agentId);
+          if (!payee) throw new Error(`There is no agent #${a.agentId} in ${a.registry}.`);
+          return { ...a, generation: payee.generation };
+        }),
+      );
+      return setX402Rules(ctx.payer, agent.agent_id, { ...step.rules, agents });
     }
   }
 }

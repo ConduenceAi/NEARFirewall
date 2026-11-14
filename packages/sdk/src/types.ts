@@ -51,6 +51,8 @@ export const REASONS = [
   "X402_NOT_ENABLED",
   "ASSET_NOT_ACCEPTED",
   "UNLISTED_DAILY_CAP",
+  "AGENT_PAYEE_MISMATCH",
+  "SITE_PAYEE_MISMATCH",
 ] as const;
 export const Reason = z.enum(REASONS);
 export type Reason = z.infer<typeof Reason>;
@@ -65,11 +67,20 @@ export const TransferNear = z.object({
  * (in the token's smallest unit) and moves exactly that much of `asset` to the
  * connection's x402 payment account, which then pays the seller.
  */
+/** An agent in some registry. Its x402 rule key is `<agent_id>@<registry>`. */
+export const AgentRef = z.object({ registry: AccountId, agent_id: z.string() });
+export type AgentRef = z.infer<typeof AgentRef>;
+export const agentRefKey = (a: AgentRef) => `${a.agent_id}@${a.registry}`;
+
 export const X402Pay = z.object({
   type: z.literal("X402Pay"),
   asset: AccountId,
   pay_to: AccountId,
   amount: U128,
+  /** The website that asked for payment: the host the client fetched. */
+  site: z.string().nullable().optional(),
+  /** The agent the seller says it is; the policy checks its holder on-chain. */
+  payee_agent: AgentRef.nullable().optional(),
 });
 export const Action = z.discriminatedUnion("type", [TransferNear, X402Pay]);
 export type Action = z.infer<typeof Action>;
@@ -188,7 +199,14 @@ export type UsageView = z.infer<typeof UsageView>;
 export const Via = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("executor"), account: AccountId }),
   z.object({ kind: z.literal("connection"), public_key: z.string(), label: z.string() }),
-  z.object({ kind: z.literal("x402"), public_key: z.string(), label: z.string(), payment_account: AccountId }),
+  z.object({
+    kind: z.literal("x402"),
+    public_key: z.string(),
+    label: z.string(),
+    payment_account: AccountId,
+    site: z.string().nullable().optional(),
+    payee_agent: z.string().nullable().optional(),
+  }),
 ]);
 export type Via = z.infer<typeof Via>;
 
@@ -208,14 +226,30 @@ export type X402Config = z.infer<typeof X402Config>;
 export const X402Limit = z.object({ per_payment_cap: U128, daily_cap: U128 });
 export type X402Limit = z.infer<typeof X402Limit>;
 
-/** The x402 limits on one mandate, in the token's smallest unit. */
+/** An approved website. With `pay_to`, it may only ask to be paid there. */
+export const X402SiteRule = X402Limit.extend({ pay_to: AccountId.nullable() });
+export type X402SiteRule = z.infer<typeof X402SiteRule>;
+
+/** An approved agent in some registry; `generation` pins it to its current holder. */
+export const X402AgentRule = X402Limit.extend({ registry: AccountId, agent_id: z.string(), generation: NumU64.nullable() });
+export type X402AgentRule = z.infer<typeof X402AgentRule>;
+
+/**
+ * The x402 limits on one mandate, in the token's smallest unit. A payment uses
+ * the first rule that matches: an approved agent the seller proves it holds,
+ * an approved seller account, an approved website, then the unlisted pool.
+ */
 export const X402Rules = z.object({
   /** Shared daily pool for x402 payments by the mandate's branch. */
   daily_cap: U128,
-  /** Sellers the owner approved, each with its own limits. */
+  /** Seller accounts the owner approved, each with its own limits. */
   sellers: z.record(z.string(), X402Limit),
-  /** Any seller not listed: a per-payment cap and one daily pool shared by all of them. */
+  /** Any other seller: a per-payment cap and one daily pool shared by all of them. */
   unlisted: X402Limit.nullable(),
+  /** Websites the owner approved, by host. */
+  sites: z.record(z.string(), X402SiteRule).default({}),
+  /** Agents the owner approved, by `<agent_id>@<registry>`. */
+  agents: z.record(z.string(), X402AgentRule).default({}),
 });
 export type X402Rules = z.infer<typeof X402Rules>;
 
@@ -225,6 +259,8 @@ export const X402UsageView = z.object({
   seller_used_today: U128.nullable(),
   unlisted_used_today: U128,
   account_used_today: U128,
+  site_used_today: U128.nullable().optional(),
+  payee_used_today: U128.nullable().optional(),
 });
 export type X402UsageView = z.infer<typeof X402UsageView>;
 

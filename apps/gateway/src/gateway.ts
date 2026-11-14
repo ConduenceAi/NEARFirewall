@@ -122,6 +122,19 @@ async function x402Summary(connection: AgentConnection) {
       daily_usdc: formatUsdc(s.daily),
       used_today_usdc: formatUsdc(s.usedToday),
     })),
+    agents: r.agents.map((a) => ({
+      agent: a.payee,
+      per_payment_usdc: formatUsdc(a.perPayment),
+      daily_usdc: formatUsdc(a.daily),
+      used_today_usdc: formatUsdc(a.usedToday),
+    })),
+    websites: r.sites.map((s) => ({
+      site: s.site,
+      per_payment_usdc: formatUsdc(s.perPayment),
+      daily_usdc: formatUsdc(s.daily),
+      used_today_usdc: formatUsdc(s.usedToday),
+      pay_to: s.payTo,
+    })),
     unlisted_sellers: r.unlisted
       ? { per_payment_usdc: formatUsdc(r.unlisted.perPayment), daily_usdc: formatUsdc(r.unlisted.daily), used_today_usdc: formatUsdc(r.unlisted.usedToday) }
       : null,

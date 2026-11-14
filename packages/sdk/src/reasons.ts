@@ -38,6 +38,8 @@ export const REASON_TEXT: Record<Reason, string> = {
   X402_NOT_ENABLED: "The owner has not turned on x402 payments for this agent.",
   ASSET_NOT_ACCEPTED: "The seller asked for a token other than the owner's x402 token (USDC).",
   UNLISTED_DAILY_CAP: "Today's budget for sellers the owner has not approved by name is used up.",
+  AGENT_PAYEE_MISMATCH: "The seller claimed an approved agent, but the account to pay does not hold it, or it changed hands since it was approved.",
+  SITE_PAYEE_MISMATCH: "This website asked to be paid at an account other than the one the owner approved for it.",
 };
 
 export function describeReason(reason: Reason): string {

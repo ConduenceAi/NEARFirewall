@@ -14,13 +14,21 @@ import { toWireAction } from "./owner.ts";
 import type { NearRpc } from "./rpc.ts";
 import { describeReason } from "./reasons.ts";
 import { loadAccessRules, type AccessRules } from "./access.ts";
-import type { Action, Connection, Mandate, Outcome, PathNode, X402Rules } from "./types.ts";
+import type { Action, AgentRef, Connection, Mandate, Outcome, PathNode, X402Rules } from "./types.ts";
 import { formatUsdc, x402AccountFor } from "./x402.ts";
 
 /** Gas for `agent_execute`: the registry check, the policy check, the transfer, and settlement. */
 export const AGENT_EXECUTE_GAS = 120n * TGAS;
 /** x402 funding also calls the token contract, so it needs more (the policy requires 125 Tgas). */
 export const X402_EXECUTE_GAS = 150n * TGAS;
+/** Paying a claimed agent adds a read of the seller's registry (the policy requires 145 Tgas). */
+export const X402_AGENT_EXECUTE_GAS = 200n * TGAS;
+
+/** What a seller said about itself: the website it answered from, and the agent it claims to be. */
+export interface X402Labels {
+  site?: string | null;
+  payeeAgent?: AgentRef | null;
+}
 
 /** What this connection may pay through x402 right now. Amounts are in USDC's smallest unit. */
 export interface AgentX402Rules {
@@ -32,6 +40,10 @@ export interface AgentX402Rules {
   maxPerPayment: bigint | null;
   /** Sellers approved by every approval on the path, with the tightest limits. */
   sellers: { seller: string; perPayment: bigint; daily: bigint; usedToday: bigint }[];
+  /** Websites approved by every approval on the path. `payTo`, when set, is the only account the site may ask for. */
+  sites: { site: string; perPayment: bigint; daily: bigint; usedToday: bigint; payTo: string | null }[];
+  /** Agents approved by every approval on the path, by `<agent_id>@<registry>`. */
+  agents: { payee: string; perPayment: bigint; daily: bigint; usedToday: bigint }[];
   /** Any other seller, or null when sellers must be approved by name. `daily` is shared by all of them. */
   unlisted: { perPayment: bigint; daily: bigint; usedToday: bigint } | null;
   budgets: { agentId: string; handle: string; daily: bigint; usedToday: bigint }[];
@@ -260,6 +272,8 @@ export class AgentConnection {
       asset: config?.asset ?? null,
       maxPerPayment: null,
       sellers: [],
+      sites: [],
+      agents: [],
       unlisted: null,
       budgets: [],
       account: { daily: null, usedToday: 0n },
@@ -301,6 +315,33 @@ export class AgentConnection {
           usedToday: (await this.policy.getX402Usage(own.node.agent_id, seller)).seller_used_today ?? 0n,
         })),
     );
+    // Websites and agents approved on every approval on the path, with the tightest limits.
+    const common = <R extends { per_payment_cap: bigint; daily_cap: bigint }>(pick: (rules: X402Rules) => Record<string, R>) =>
+      Object.keys(pick(sets[0]!))
+        .filter((k) => sets.every((rules) => k in pick(rules)))
+        .map((k) => ({
+          key: k,
+          rules: sets.map((r) => pick(r)[k]!),
+          perPayment: minBig([...sets.map((r) => pick(r)[k]!.per_payment_cap), maxPerPayment])!,
+          daily: minBig([...sets.map((r) => pick(r)[k]!.daily_cap), ...sets.map((r) => r.daily_cap)])!,
+        }));
+    const sites = await Promise.all(
+      common((r) => r.sites).map(async (s) => ({
+        site: s.key,
+        perPayment: s.perPayment,
+        daily: s.daily,
+        usedToday: (await this.policy.getX402Usage(own.node.agent_id, undefined, { site: s.key })).site_used_today ?? 0n,
+        payTo: s.rules.find((r) => r.pay_to)?.pay_to ?? null,
+      })),
+    );
+    const agents = await Promise.all(
+      common((r) => r.agents).map(async (a) => ({
+        payee: a.key,
+        perPayment: a.perPayment,
+        daily: a.daily,
+        usedToday: (await this.policy.getX402Usage(own.node.agent_id, undefined, { payee: a.key })).payee_used_today ?? 0n,
+      })),
+    );
     const ownUsage = await this.policy.getX402Usage(own.node.agent_id);
     const unlisted = sets.every((r) => r.unlisted)
       ? {
@@ -322,6 +363,8 @@ export class AgentConnection {
       asset: config.asset,
       maxPerPayment,
       sellers,
+      sites,
+      agents,
       unlisted,
       budgets,
       account: { daily: config.account_daily_cap, usedToday: ownUsage.account_used_today },
@@ -333,11 +376,11 @@ export class AgentConnection {
   }
 
   /** Would this x402 payment be allowed by the owner's policy? Reads only; nothing moves. */
-  async previewX402(asset: string, payTo: string, amount: bigint) {
+  async previewX402(asset: string, payTo: string, amount: bigint, labels: X402Labels = {}) {
     const connection = await this.connection();
     const registry = await this.registry();
     const path = await registry.getPath(connection.agent_id);
-    const action: Action = { type: "X402Pay", asset, pay_to: payTo, amount };
+    const action: Action = { type: "X402Pay", asset, pay_to: payTo, amount, site: labels.site ?? null, payee_agent: labels.payeeAgent ?? null };
     return this.policy.preview({ path, executor: this.account, action, requestId: newRequestId() });
   }
 
@@ -346,16 +389,16 @@ export class AgentConnection {
    * `amount` of `asset` is now in this key's payment account, ready to pay
    * `payTo`. The caller then signs the seller's transfer from that account.
    */
-  async fundX402(asset: string, payTo: string, amount: bigint, requestId = newRequestId()): Promise<AgentPayResult> {
+  async fundX402(asset: string, payTo: string, amount: bigint, requestId = newRequestId(), labels: X402Labels = {}): Promise<AgentPayResult> {
     const connection = this.cached ?? (await this.connection());
     await this.journal.prepare({ payer: this.account, agentId: connection.agent_id, recipient: payTo, amount, requestId });
     const before = this.journal.get(requestId);
     await this.journal.update(requestId, { state: "submitted", attempts: (before?.attempts ?? 0) + 1 });
-    const action: Action = { type: "X402Pay", asset, pay_to: payTo, amount };
+    const action: Action = { type: "X402Pay", asset, pay_to: payTo, amount, site: labels.site ?? null, payee_agent: labels.payeeAgent ?? null };
     try {
       const { txHash, status } = await this.submit(
         { action: toWireAction(action), request_id: requestId, client: this.client },
-        X402_EXECUTE_GAS,
+        labels.payeeAgent ? X402_AGENT_EXECUTE_GAS : X402_EXECUTE_GAS,
       );
       if (txHash) await this.journal.update(requestId, { txHash });
       const parsed = parseFinalStatus(status);
