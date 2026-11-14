@@ -1,191 +1,186 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowRight, ArrowUp, ChevronRight, Gauge, KeyRound, Link2, RotateCcw, ShieldCheck, Wallet } from "lucide-react";
-import { near } from "../format.ts";
-import { AGENT_PAYMENT_CAP, CONFIRM_ABOVE, evaluateDemoPayment, INITIAL_SPEND, parseDemoRequest, RECIPIENT_DAILY_CAP, RECIPIENT_PAYMENT_CAP, type DemoPayment } from "../payment-demo.ts";
+import { useState, type FormEvent } from "react";
+import { ArrowRight, Code2, KeyRound, RotateCcw, Users } from "lucide-react";
 import { href } from "../router.ts";
 
-const SCENARIOS = [
-  { label: "Trading · Fund a strategy wallet", detail: "Request 3 NEAR for an unregistered market data vendor", prompt: "Pay Market Signals 3 NEAR for the trading desk’s data feed.", vendor: "Strategy Wallet", alternate: "Market Signals", app: "Trading desk", logo: null, config: null, agent: "market-maker", parent: "treasury", avatar: "📈", tone: "trading" },
-  { label: "HR · Background checks", detail: "Pay 2 NEAR for a new hire’s screening", prompt: "Pay ClearCheck 2 NEAR for the new hire’s background check.", vendor: "ClearCheck", alternate: "QuickScreen", app: "Claude Desktop", logo: "claude.svg", config: "claude_desktop_config.json", agent: "people-ops", avatar: "🪪", tone: "hr" },
-  { label: "Engineering · CI renewal", detail: "Review a 3 NEAR build service invoice", prompt: "Pay BuildCloud 3 NEAR to renew our CI build credits.", vendor: "BuildCloud", alternate: "FastBuild", app: "Cursor", logo: "cursor.svg", config: "~/.cursor/mcp.json", agent: "dev-ops", avatar: "💻", tone: "engineering" },
-  { label: "Operations · Shipping labels", detail: "A 4 NEAR invoice exceeds the per-payment limit", prompt: "Pay ParcelDesk 4 NEAR for this week’s shipping labels.", vendor: "ParcelDesk", alternate: "QuickShip", app: "Custom runner", logo: null, config: null, agent: "fulfillment", avatar: "📦", tone: "operations" },
-] as const;
+const DAY = 86_400_000;
+const START = Date.UTC(2026, 5, 1);
+const dateLabel = new Intl.DateTimeFormat("en", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
+const ROLES = {
+  Contractor: { amount: 40, cadence: "weekly" },
+  Engineer: { amount: 180, cadence: "monthly" },
+} as const;
 
-const STATUS = { settled: "Settled", blocked: "Blocked", pending: "Needs approval", declined: "Declined" };
+type Department = "engineering" | "hr";
+type Cadence = "weekly" | "monthly";
+type Role = keyof typeof ROLES;
+type Payee = {
+  id: number;
+  department: Department;
+  name: string;
+  amount: number;
+  cadence: Cadence;
+  nextDue: number;
+  status: "approved" | "pending" | "declined";
+  role?: Role;
+};
+type Payment = { payee: Payee; due: number };
+
+const INITIAL_PAYEES: Payee[] = [
+  { id: 1, department: "engineering", name: "Newsliquid", amount: 8, cadence: "monthly", nextDue: START, status: "approved" },
+  { id: 2, department: "engineering", name: "Predixon", amount: 12, cadence: "monthly", nextDue: START, status: "approved" },
+  { id: 3, department: "hr", name: "Maya Rao", role: "Contractor", ...ROLES.Contractor, nextDue: START, status: "approved" },
+  { id: 4, department: "hr", name: "Alex Chen", role: "Engineer", ...ROLES.Engineer, nextDue: START, status: "approved" },
+];
+
+function nextOccurrence(date: number, cadence: Cadence) {
+  if (cadence === "weekly") return date + 7 * DAY;
+  const current = new Date(date);
+  return Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 1);
+}
 
 export function PaymentDemo() {
-  const [scenario, setScenario] = useState<(typeof SCENARIOS)[number]>(SCENARIOS[0]);
-  const [step, setStep] = useState<"connect" | "authorize" | "configure" | "chat">("connect");
-  const [childCreated, setChildCreated] = useState(false);
-  const [parentPaused, setParentPaused] = useState(false);
-  const parent = "parent" in scenario ? scenario.parent : null;
-  const [prompt, setPrompt] = useState<string>(SCENARIOS[0].prompt);
-  const [payments, setPayments] = useState<DemoPayment[]>([]);
-  const [error, setError] = useState("");
-  const [view, setView] = useState<"chat" | "activity">("chat");
-  const conversation = useRef<HTMLDivElement>(null);
-  const name = (recipient: DemoPayment["recipient"]) => recipient === "noa" ? scenario.vendor : scenario.alternate;
-  const appIcon = scenario.logo ? <img className="demo-agent-icon" src={`/integrations/${scenario.logo}`} width={40} height={40} alt="" /> : <span className="demo-agent-icon"><Gauge size={20} aria-hidden="true" /></span>;
-  const spent = payments.reduce((sum, payment) => payment.status === "settled" ? sum + payment.amount : sum, INITIAL_SPEND);
-  const reserved = payments.reduce((sum, payment) => payment.status === "pending" ? sum + payment.amount : sum, 0n);
+  const [department, setDepartment] = useState<Department>("engineering");
+  const [date, setDate] = useState(START);
+  const [payees, setPayees] = useState(INITIAL_PAYEES);
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [name, setName] = useState("");
+  const [role, setRole] = useState<Role>("Contractor");
+  const [message, setMessage] = useState("");
+  const isHR = department === "hr";
+  const agent = department + ".company.near";
+  const visible = payees.filter((payee) => payee.department === department);
+  const due = visible.some((payee) => payee.status === "approved" && payee.nextDue <= date);
+  const activity = payments.filter((payment) => payment.payee.department === department);
 
-  useEffect(() => {
-    const log = conversation.current;
-    if (log) log.scrollTop = log.scrollHeight;
-  }, [payments.length, step, view]);
-
-  function send(event: FormEvent<HTMLFormElement>) {
+  function requestApproval(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (step !== "chat") return;
-    const request = parseDemoRequest(prompt, scenario.vendor, scenario.alternate);
-    if (!request) {
-      setError("Include one positive amount in NEAR and one of this scenario’s vendors. Try one of the sample messages.");
+    const recipient = name.trim();
+    if (!recipient) return;
+    if (visible.some((payee) => payee.status !== "declined" && payee.name.toLowerCase() === recipient.toLowerCase())) {
+      setMessage(recipient + " already has a rule or a pending request.");
       return;
     }
-    const decision = parent && parentPaused
-      ? { status: "blocked" as const, detail: "The treasury parent is paused, so its child cannot request payments.", previewBlocked: true }
-      : evaluateDemoPayment(request, spent, reserved, scenario.vendor, scenario.alternate, Boolean(parent));
-    setPayments([...payments, { ...request, ...decision, id: payments.length + 1, prompt: prompt.trim() }]);
-    setPrompt("");
-    setError("");
+    const rule = isHR ? ROLES[role] : { amount: 10, cadence: "monthly" as const };
+    setPayees([...payees, {
+      id: payees.length + 1, department, name: recipient, ...rule, role: isHR ? role : undefined,
+      nextDue: date, status: "pending",
+    }]);
+    setName("");
+    setMessage("Owner approval requested for " + recipient + ".");
   }
 
-  function resolve(payment: DemoPayment, approve: boolean) {
-    setPayments((current) => current.map((item) => item.id !== payment.id || item.status !== "pending" ? item : {
-      ...item,
-      status: approve ? "settled" : "declined",
-      detail: approve ? `You approved ${near(item.amount)} to ${name(item.recipient)}. The payment settled.` : "The payment failed because you declined the request. I released its budget reservation.",
-    }));
+  function review(payee: Payee, approve: boolean) {
+    const cadence = payee.cadence;
+    const today = new Date(date);
+    const nextDue = cadence === "weekly" ? date + 7 * DAY : Date.UTC(today.getUTCFullYear(), today.getUTCMonth() + 1, 1);
+    setPayees(payees.map((item) => item.id === payee.id ? { ...item, nextDue, status: approve ? "approved" : "declined" } : item));
+    setMessage(approve ? payee.name + " approved. First payment is due " + dateLabel.format(nextDue) + "." : "The owner declined " + payee.name + ".");
+  }
+
+  function runPayments() {
+    const settled: Payment[] = [];
+    const updated = payees.map((payee) => {
+      if (payee.department !== department || payee.status !== "approved" || payee.nextDue > date) return payee;
+      let nextDue = payee.nextDue;
+      while (nextDue <= date) {
+        settled.push({ payee, due: nextDue });
+        nextDue = nextOccurrence(nextDue, payee.cadence);
+      }
+      return { ...payee, nextDue };
+    });
+    if (settled.length === 0) return;
+    setPayees(updated);
+    setPayments([...payments, ...settled.sort((a, b) => a.due - b.due)]);
+    setMessage(settled.length + (settled.length === 1 ? " payment settled" : " payments settled") + " under approved rules.");
+  }
+
+  function selectDepartment(next: Department) {
+    setDepartment(next);
+    setName("");
+    setMessage("");
   }
 
   function reset() {
-    setStep("connect");
-    setChildCreated(false);
-    setParentPaused(false);
-    setView("chat");
+    selectDepartment("engineering");
+    setDate(START);
+    setPayees(INITIAL_PAYEES);
     setPayments([]);
-    setPrompt(scenario.prompt);
-    setError("");
+    setRole("Contractor");
   }
 
-  const ownerActions = (payment: DemoPayment) => (
-    <div className="demo-approval" role="group" aria-label={`Review request ${payment.id}`}>
-      <button type="button" onClick={() => resolve(payment, false)}>Decline</button>
-      <button type="button" className="primary" disabled={parentPaused} onClick={() => resolve(payment, true)}>{payment.recipient === "dragons" ? "Approve once" : "Approve payment"}</button>
-    </div>
-  );
-
   return (
-    <section className="landing-section walkthrough" id="payment-walkthrough" aria-labelledby="walkthrough-title">
+    <section className="landing-section walkthrough company-demo" id="payment-walkthrough" aria-labelledby="walkthrough-title">
       <div className="walkthrough-copy">
-        <h2 id="walkthrough-title">Try it here.</h2>
-        <p className="lead">Choose a trading or workplace scenario and see what happens when its agent requests a payment.</p>
-        <div className="payment-scenarios" role="group" aria-label="Sample invoices">
-          {SCENARIOS.map((option) => {
-            const { label, detail, avatar, tone } = option;
-            return (
-            <button key={label} type="button" aria-pressed={scenario === option} onClick={() => { if (scenario !== option) reset(); setScenario(option); setPrompt(option.prompt); setView("chat"); }}>
-              <span className="scenario-icon" data-tone={tone} aria-hidden="true">{avatar}</span>
-              <span><strong>{label}</strong><small>{detail}</small></span>
-              <ChevronRight size={17} aria-hidden="true" />
-            </button>
-            );
-          })}
+        <h2 id="walkthrough-title">Try it</h2>
+        <p className="lead">Run approved payments, request an exception, then advance the company calendar to see what comes due.</p>
+        <div className="payment-scenarios" role="group" aria-label="Department">
+          <button type="button" aria-pressed={!isHR} onClick={() => selectDepartment("engineering")}>
+            <span className="scenario-icon" data-tone="engineering"><Code2 size={18} aria-hidden="true" /></span>
+            <span><strong>Engineering</strong><small>Renew subscriptions and request a new vendor.</small></span>
+            <ArrowRight size={16} aria-hidden="true" />
+          </button>
+          <button type="button" aria-pressed={isHR} onClick={() => selectDepartment("hr")}>
+            <span className="scenario-icon" data-tone="hr"><Users size={18} aria-hidden="true" /></span>
+            <span><strong>HR</strong><small>Run payroll and request approval for a new hire.</small></span>
+            <ArrowRight size={16} aria-hidden="true" />
+          </button>
         </div>
-        <a className="text-link demo-setup-link" href={href("/docs/connect-agent")}>Set up a real connection <ArrowRight size={15} aria-hidden="true" /></a>
+        <a className="text-link demo-setup-link" href={href("/docs/connect-agent")}>Connect a real agent <ArrowRight size={15} aria-hidden="true" /></a>
       </div>
 
       <div className="walkthrough-panel">
         <header className="demo-panel-header">
-          {appIcon}
-          <div><h3>{scenario.app}</h3><p>{step === "chat" ? scenario.agent + " connected" : scenario.label}</p></div>
-          <span className="demo-mode">Interactive demo</span>
-          <button className="icon-btn" type="button" title="Restart demo" aria-label="Restart demo" onClick={reset}><RotateCcw size={16} aria-hidden="true" /></button>
+          <span className="demo-agent-icon"><KeyRound size={19} aria-hidden="true" /></span>
+          <div><h3>{isHR ? "Payroll" : "Subscriptions"}</h3><p><code>{agent}</code></p></div>
+          <span className="demo-mode">Simulation</span>
+          <button className="icon-btn" type="button" aria-label="Restart demo" title="Restart demo" onClick={reset}><RotateCcw size={16} aria-hidden="true" /></button>
         </header>
 
-        {parent && (
-          <div className="demo-activity demo-hierarchy">
-            <strong>Demo wallet</strong>
-            <ul>
-              <li><span>{parent} · Parent · {near(AGENT_PAYMENT_CAP)} per payment</span>
-                <ul>{childCreated && <li>{scenario.agent} · Child · {near(RECIPIENT_PAYMENT_CAP)} to {scenario.vendor}</li>}</ul>
-              </li>
-            </ul>
-            {step === "chat" && <button type="button" onClick={() => setParentPaused(!parentPaused)}>{parentPaused ? "Resume treasury" : "Pause treasury"}</button>}
-          </div>
-        )}
-        {parent && !childCreated ? (
-          <div className="demo-connect">
-            <h4>Create a trading agent under treasury</h4>
-            <p>Treasury sets the branch ceiling. The child can request transfers within its limits, with owner approval for unregistered vendors and payments above {near(CONFIRM_ABOVE)}.</p>
-            <button type="button" className="primary" onClick={() => setChildCreated(true)}>Create child agent <ArrowRight size={16} aria-hidden="true" /></button>
-            <small>Demo funds a strategy wallet with simulated NEAR.</small>
-          </div>
-        ) : step !== "chat" ? (
-          <div className="demo-connect">
-            <div className="demo-connection-icons" aria-hidden="true">
-              {appIcon}
-              <Link2 size={20} />
-              <img src="/logo-green.png" width={48} height={48} alt="" />
-            </div>
-            <h4>{step === "connect" ? "Connect your payment agent" : step === "authorize" ? "Authorize a restricted key" : scenario.config ? "Load the MCP configuration" : "Start the demo runner"}</h4>
-            <p>{step === "connect" ? scenario.agent + " can request vendor payments within your spending rules."
-              : step === "authorize" ? "In the real setup, your wallet signs the key authorization. The agent uses that key to request payments under your rules."
-              : scenario.config ? "Add the NEARFirewall MCP server to your client configuration. The demo loads the agent’s rules for you." : "The runner uses the restricted key to submit payment requests. Start it here to load the spending rules."}</p>
-            {step === "authorize" && <div className="demo-policy"><KeyRound size={17} aria-hidden="true" /> <code>agent_execute</code><span>Restricted function-call key</span></div>}
-            {step === "configure" && <div className="demo-policy"><code>{scenario.config ?? "Restricted-key runner"}</code></div>}
-            <button className="primary" type="button" onClick={() => setStep(step === "connect" ? "authorize" : step === "authorize" ? "configure" : "chat")}>
-              {step === "connect" ? "Connect " + scenario.app : step === "authorize" ? "Authorize demo key" : scenario.config ? "Load config and open chat" : "Start runner"} <ArrowRight size={16} aria-hidden="true" />
-            </button>
-            <small>Uses sample data. No wallet or real funds.</small>
-          </div>
-        ) : (
-          <>
-            <div className="demo-wallet-strip"><ShieldCheck size={17} aria-hidden="true" /><span>{parent ? "Trading desk" : scenario.vendor} budget <strong>{near(RECIPIENT_DAILY_CAP - spent - reserved)} left</strong></span>{reserved > 0n && <small>{near(reserved)} reserved</small>}</div>
-            <div className="demo-views" role="group" aria-label="Demo view">
-              <button type="button" aria-pressed={view === "chat"} onClick={() => setView("chat")}>Chat</button>
-              <button type="button" aria-pressed={view === "activity"} onClick={() => setView("activity")}>Activity {payments.length > 0 && <span>{payments.length}</span>}</button>
-            </div>
-            {view === "chat" ? (
-              <>
-                <div className="demo-conversation" ref={conversation} role="log" aria-label="Demo agent conversation">
-                  <div className="demo-reply">
-                    <div className="demo-tool"><code>get_rules</code><span>Rules loaded</span></div>
-                    <p>I can pay {scenario.vendor} up to {near(RECIPIENT_PAYMENT_CAP)} per invoice and {near(RECIPIENT_DAILY_CAP)} per day. I’ll ask you first above {near(CONFIRM_ABOVE)}. {parent && " An unregistered vendor needs your permission for each payment."} Which invoice should I pay?</p>
-                  </div>
-                  {payments.map((payment) => <div className="demo-exchange" key={payment.id}>
-                    <p className="demo-bubble">{payment.prompt}</p>
-                    <div className="demo-reply" data-status={payment.status}>
-                      <div className="demo-tool"><code>preview_payment</code>{!payment.previewBlocked && <><ChevronRight size={13} aria-hidden="true" /><code>pay</code></>}</div>
-                      <strong>{STATUS[payment.status]}</strong><p>{payment.detail}</p>
-                      {payment.status === "pending" && ownerActions(payment)}
-                    </div>
-                  </div>)}
+        <div className="demo-wallet-strip">
+          <strong>{dateLabel.format(date)}</strong>
+          <button type="button" onClick={() => { setDate(date + 7 * DAY); setMessage(""); }}>Advance one week</button>
+        </div>
+
+        <div className="company-demo-body">
+          <ul className="company-payee-list" aria-label={isHR ? "Payroll rules" : "Subscription rules"}>
+            {visible.map((payee) => (
+              <li key={payee.id}>
+                <div><strong>{payee.name}</strong><small>{payee.role ? payee.role + " · " : ""}{payee.amount} NEAR {payee.cadence}</small></div>
+                <div className="payee-state" data-state={payee.status}>
+                  {payee.status === "approved" ? (payee.nextDue <= date ? "Due now" : "Next " + dateLabel.format(payee.nextDue))
+                    : payee.status === "pending" ? "Needs owner approval" : "Declined"}
                 </div>
-                <form className="demo-composer" onSubmit={send}>
-                  <label className="visually-hidden" htmlFor="demo-prompt">Message the agent</label>
-                  <input id="demo-prompt" value={prompt} maxLength={200} placeholder="Ask the agent to pay an invoice…" autoComplete="off"
-                    aria-invalid={Boolean(error)} aria-describedby={error ? "demo-prompt-error" : undefined}
-                    onChange={(event) => { setPrompt(event.target.value); setError(""); }} />
-                  <button className="primary icon-btn demo-send" type="submit" aria-label="Send message" title="Send message" disabled={!prompt.trim()}><ArrowUp size={18} aria-hidden="true" /></button>
-                  {error && <p id="demo-prompt-error" role="alert">{error}</p>}
-                </form>
-              </>
-            ) : (
-              <div className="demo-activity">
-                {payments.length === 0 ? <p>Send an invoice in Chat to see its outcome here.</p> : <ol>
-                  {payments.toReversed().map((payment) => <li key={payment.id} data-status={payment.status}>
-                    <span><Wallet size={16} aria-hidden="true" /> {name(payment.recipient)}</span>
-                    <strong>{near(payment.amount)}</strong>
-                    <small>{STATUS[payment.status]}</small>
-                    {payment.status === "pending" && ownerActions(payment)}
-                  </li>)}
-                </ol>}
-              </div>
-            )}
-            <footer className="demo-footer">Simulation · Agent ceiling {near(AGENT_PAYMENT_CAP)} per payment</footer>
-          </>
-        )}
+                {payee.status === "pending" && (
+                  <div className="demo-approval" role="group" aria-label={"Owner review for " + payee.name}>
+                    <button type="button" onClick={() => review(payee, false)}>Decline</button>
+                    <button type="button" className="primary" onClick={() => review(payee, true)}>Approve rule</button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+          <button type="button" className="primary" disabled={!due} onClick={runPayments}>{isHR ? "Run due payroll" : "Pay due subscriptions"}</button>
+
+          <form className="company-demo-form" onSubmit={requestApproval}>
+            <h4>{isHR ? "Add a new employee" : "Add a subscription vendor"}</h4>
+            <label>{isHR ? "Employee name" : "Vendor name"}<input required maxLength={60} value={name} onChange={(event) => setName(event.target.value)} /></label>
+            {isHR ? <label>Role and pay schedule<select value={role} onChange={(event) => setRole(event.target.value as Role)}>
+              {Object.entries(ROLES).map(([key, rule]) => <option key={key} value={key}>{key} · {rule.amount} NEAR {rule.cadence}</option>)}
+            </select></label> : <small>Sample subscription rule · 10 NEAR monthly</small>}
+            <button type="submit">Request owner approval</button>
+          </form>
+
+          <p className="company-demo-message" role="status">{message}</p>
+          <div className="company-demo-log">
+            <h4>Payment activity</h4>
+            {activity.length === 0 ? <p>Run a due payment to see its record here.</p> : <ol aria-label="Simulated payment records">
+              {activity.toReversed().map(({ payee, due: paymentDate }) => (
+                <li key={payee.id + "-" + paymentDate}><span>{agent} → <strong>{payee.name}</strong></span><small>{payee.amount} NEAR · Due {dateLabel.format(paymentDate)} · Settled</small></li>
+              ))}
+            </ol>}
+          </div>
+        </div>
+        <footer className="demo-footer">Sample schedules and amounts · No wallet or real funds required</footer>
       </div>
     </section>
   );

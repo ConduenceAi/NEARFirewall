@@ -1116,3 +1116,69 @@ body:has(.inspector) .guide { right: calc(min(var(--inspector-width), 100vw) + 1
   .dg-label, .dg-sub, .dg-edge-label, .dg-step text { fill: CanvasText; }
   .dg-marker, .dg-step circle { fill: CanvasText; }
 }
+
+/* Company payment use cases */
+.company-map { margin: 0; min-width: 0; display: grid; justify-items: center; }
+.company-wallet, .company-branches > div {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+}
+.company-wallet { display: flex; align-items: center; gap: 10px; }
+.company-map svg, .department-grid svg { color: var(--ok-text); }
+.company-map code { display: block; overflow-wrap: anywhere; color: var(--muted); font-size: 0.73rem; }
+.company-branches {
+  position: relative;
+  width: 100%;
+  padding-top: 26px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.company-branches::before {
+  content: "";
+  position: absolute;
+  inset: 0 50% auto auto;
+  height: 13px;
+  border-left: 1px solid var(--hero-muted);
+}
+.company-branches::after {
+  content: "";
+  position: absolute;
+  top: 13px;
+  left: calc(25% - 3px);
+  right: calc(25% - 3px);
+  height: 13px;
+  border: 1px solid var(--hero-muted);
+  border-bottom: 0;
+  pointer-events: none;
+}
+.company-branches > div { display: grid; align-content: start; gap: 4px; }
+.company-branches small { color: var(--muted); }
+.company-map figcaption { display: flex; align-items: center; gap: 7px; margin-top: 14px; color: var(--hero-muted); font-size: 0.84rem; }
+.department-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 30px; }
+.department-grid article { border: 1px solid var(--border); background: var(--surface); border-radius: 14px; padding: clamp(16px, 3vw, 30px); }
+.department-grid h3 { margin: 10px 0 3px; }
+.department-grid p, .company-demo-log p { color: var(--muted); margin: 4px 0 0; }
+.company-demo .demo-wallet-strip { justify-content: space-between; }
+.company-demo-body { display: grid; gap: 12px; padding: 16px clamp(13px, 2.4vw, 24px); }
+.company-demo-body > button, .company-demo-form > button { justify-self: start; }
+.company-payee-list, .company-demo-log ol { list-style: none; padding: 0; margin: 0; }
+.company-payee-list > li, .company-demo-log li { border-bottom: 1px solid var(--border); padding: 9px 0; overflow-wrap: anywhere; }
+.company-payee-list > li { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 10px; }
+.company-payee-list small, .company-demo-log small { display: block; color: var(--muted); }
+.payee-state { font-size: 0.76rem; text-align: right; color: var(--muted); }
+.payee-state[data-state="pending"] { color: var(--text); font-weight: 600; }
+.company-payee-list .demo-approval { grid-column: 1 / -1; }
+.company-demo-form { display: grid; gap: 9px; margin-top: 5px; padding-top: 13px; border-top: 1px solid var(--border); }
+.company-demo-form h4, .company-demo-log h4, .company-demo-message { margin: 0; }
+.company-demo-form label { display: grid; gap: 4px; font-size: 0.83rem; }
+.company-demo-form input, .company-demo-form select { width: 100%; min-height: 36px; }
+.company-demo-message { color: var(--ok-text); font-size: 0.85rem; }
+.company-demo-message:empty { margin-top: -12px; }
+.company-demo-log ol { max-height: 195px; overflow: auto; }
+@media (max-width: 600px) {
+  .department-grid { grid-template-columns: 1fr; }
+}
