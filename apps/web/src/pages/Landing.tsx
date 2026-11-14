@@ -13,12 +13,6 @@ const STEPS = [
   { title: "Approve recipients and connect", text: "Set the spending limits and connect the agent with a restricted key." },
 ];
 
-const CONTROLS = [
-  { title: "Limits per recipient", text: "Set a per-payment cap and daily cap for each recipient, inside an overall budget for the agent." },
-  { title: "Control each agent", text: "Give child agents narrower permissions. Pause one agent, its entire branch, or all agent payments from your account." },
-  { title: "Owner-controlled access", text: "Your keys stay in your wallet. Transferring an agent NFT invalidates the previous owner’s payment approvals." },
-];
-
 const INTEGRATIONS = [
   { name: "Claude Desktop", icon: "claude.svg", position: "chat" },
   { name: "Claude Code", icon: "claude-code.svg", position: "code" },
@@ -76,14 +70,6 @@ export function Landing() {
               <a className="text-link" href="#payment-walkthrough">Try it here <ArrowDown size={16} aria-hidden="true" /></a>
             </header>
           </div>
-          <ul className="control-list">
-            {CONTROLS.map(({ title, text }) => (
-              <li key={title}>
-                <h3>{title}</h3>
-                <p>{text}</p>
-              </li>
-            ))}
-          </ul>
         </section>
 
         <PaymentDemo />
@@ -115,16 +101,7 @@ export function Landing() {
           </div>
         </section>
 
-        <section className="landing-section launch-strip" aria-labelledby="launch-title">
-          <h2 id="launch-title">Put your first agent on a budget.</h2>
-          <WalletEntry placement="landing" />
-        </section>
       </main>
-
-      <footer className="footer">
-        <span>NEARFirewall</span>
-        <span>Built on NEAR Testnet</span>
-      </footer>
     </div>
   );
 }

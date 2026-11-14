@@ -48,6 +48,9 @@ export const REASONS = [
   "CONFIRMATION_EXPIRED",
   "TOO_MANY_PENDING",
   "RECIPIENT_BLOCKED",
+  "X402_NOT_ENABLED",
+  "ASSET_NOT_ACCEPTED",
+  "UNLISTED_DAILY_CAP",
 ] as const;
 export const Reason = z.enum(REASONS);
 export type Reason = z.infer<typeof Reason>;
@@ -57,13 +60,28 @@ export const TransferNear = z.object({
   recipient: AccountId,
   amount: U128,
 });
-export const Action = z.discriminatedUnion("type", [TransferNear]);
+/**
+ * Fund one x402 payment: the policy checks `pay_to` (the seller) and `amount`
+ * (in the token's smallest unit) and moves exactly that much of `asset` to the
+ * connection's x402 payment account, which then pays the seller.
+ */
+export const X402Pay = z.object({
+  type: z.literal("X402Pay"),
+  asset: AccountId,
+  pay_to: AccountId,
+  amount: U128,
+});
+export const Action = z.discriminatedUnion("type", [TransferNear, X402Pay]);
 export type Action = z.infer<typeof Action>;
 
 export const Capabilities = z.object({
   transfer_near: z.object({ max_per_payment: U128 }).nullable().optional(),
 });
 export type Capabilities = z.infer<typeof Capabilities>;
+
+/** The largest x402 payment an agent may request, in the token's smallest unit. */
+export const CapX402 = z.object({ max_per_payment: U128 });
+export type CapX402 = z.infer<typeof CapX402>;
 
 export const PathNode = z.object({ agent_id: z.string(), generation: NumU64 });
 export type PathNode = z.infer<typeof PathNode>;
@@ -92,6 +110,8 @@ export const AgentView = z.object({
   depth: z.number(),
   executor: AccountId.nullable(),
   capabilities: Capabilities,
+  /** Absent on registries deployed before x402. */
+  x402: CapX402.nullable().optional(),
   status: AgentStatus,
   expires_at: U64.nullable(),
   locks: z.number(),
@@ -161,12 +181,52 @@ export const UsageView = z.object({
 });
 export type UsageView = z.infer<typeof UsageView>;
 
-/** How a request reached the policy. */
+/**
+ * How a request reached the policy. For `x402`, the record's recipient is the
+ * seller and its amount is in the x402 token (USDC), not NEAR.
+ */
 export const Via = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("executor"), account: AccountId }),
   z.object({ kind: z.literal("connection"), public_key: z.string(), label: z.string() }),
+  z.object({ kind: z.literal("x402"), public_key: z.string(), label: z.string(), payment_account: AccountId }),
 ]);
 export type Via = z.infer<typeof Via>;
+
+/** True when a record's amount is in the x402 token rather than NEAR. */
+export function isX402(via: Via | null | undefined): boolean {
+  return via?.kind === "x402";
+}
+
+/** Account-wide x402 settings. */
+export const X402Config = z.object({
+  /** The token sellers are paid in: the USDC contract on this network. */
+  asset: AccountId,
+  account_daily_cap: U128.nullable(),
+});
+export type X402Config = z.infer<typeof X402Config>;
+
+export const X402Limit = z.object({ per_payment_cap: U128, daily_cap: U128 });
+export type X402Limit = z.infer<typeof X402Limit>;
+
+/** The x402 limits on one mandate, in the token's smallest unit. */
+export const X402Rules = z.object({
+  /** Shared daily pool for x402 payments by the mandate's branch. */
+  daily_cap: U128,
+  /** Sellers the owner approved, each with its own limits. */
+  sellers: z.record(z.string(), X402Limit),
+  /** Any seller not listed: a per-payment cap and one daily pool shared by all of them. */
+  unlisted: X402Limit.nullable(),
+});
+export type X402Rules = z.infer<typeof X402Rules>;
+
+export const X402UsageView = z.object({
+  day: NumU64,
+  mandate_used_today: U128,
+  seller_used_today: U128.nullable(),
+  unlisted_used_today: U128,
+  account_used_today: U128,
+});
+export type X402UsageView = z.infer<typeof X402UsageView>;
 
 export const PaymentRequestRecord = z.object({
   leaf: z.string(),

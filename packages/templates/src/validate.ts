@@ -8,6 +8,8 @@ import {
   MAX_RECIPIENTS,
   SUPPORTED_LOCKS,
   formatNear,
+  formatUsdc,
+  type CapX402,
   type Capabilities,
   type PolicyClient,
   type RegistryClient,
@@ -38,7 +40,8 @@ export type IssueCode =
   | "CAPABILITIES_LOCKED"
   | "PAYMENTS_NOT_ENABLED"
   | "UNKNOWN_CONTRACT"
-  | "BUDGET_ABOVE_BALANCE";
+  | "BUDGET_ABOVE_BALANCE"
+  | "X402_NEEDS_MANDATE";
 
 export interface ValidationIssue {
   level: "error" | "warning";
@@ -59,6 +62,7 @@ const LOOKS_HASHED = /^(0x)?[0-9a-f]{64}$|^(sha256|enc|ipfs|ar):/i;
 
 interface AgentShape {
   capabilities: Capabilities;
+  x402: CapX402 | null;
   expiresAt: bigint | null;
   executor: string | null;
   depth: number;
@@ -69,9 +73,12 @@ function capMax(c: Capabilities): bigint | null {
 }
 
 function within(inner: Capabilities, outer: Capabilities): boolean {
-  const i = capMax(inner);
-  const o = capMax(outer);
-  return i === null || (o !== null && i <= o);
+  return maxWithin(capMax(inner), capMax(outer));
+}
+
+/** A missing cap allows nothing, so it always fits; a present one needs a larger outer cap. */
+function maxWithin(inner: bigint | null, outer: bigint | null): boolean {
+  return inner === null || (outer !== null && inner <= outer);
 }
 
 function expiryWithin(inner: bigint | null, outer: bigint | null): boolean {
@@ -91,6 +98,7 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
 
   const agents = new Map<string, AgentShape>();
   const executors = new Set<string>();
+  const mandated = new Set<string>();
 
   plan.steps.forEach((step, i) => {
     switch (step.kind) {
@@ -108,11 +116,14 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
         if (step.expiresAt != null && step.expiresAt <= ctx.now) {
           add("error", "EXPIRY_IN_PAST", "The expiry must be in the future.", i);
         }
-        if (capMax(step.capabilities) === null) {
+        const x402Max = step.x402?.max_per_payment ?? null;
+        if (capMax(step.capabilities) === null && x402Max === null) {
           add("warning", "UNSUPPORTED_ACTION", `${handle} is not allowed to make any payments.`, i);
-        } else if (capMax(step.capabilities) === 0n) {
+        }
+        if (capMax(step.capabilities) === 0n) {
           add("error", "ZERO_CAP", `${handle} has a zero per-payment capability.`, i);
         }
+        if (x402Max === 0n) add("error", "ZERO_CAP", `${handle} has a zero x402 per-payment capability.`, i);
         let depth = 0;
         if (step.kind === "create_child") {
           const parent = agents.get(step.parentHandle);
@@ -120,6 +131,9 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
             depth = parent.depth + 1;
             if (!within(step.capabilities, parent.capabilities)) {
               add("error", "CHILD_WIDER_THAN_PARENT", `${handle} cannot have a higher payment cap than ${step.parentHandle}.`, i);
+            }
+            if (!maxWithin(x402Max, parent.x402?.max_per_payment ?? null)) {
+              add("error", "CHILD_WIDER_THAN_PARENT", `${handle} cannot have a higher x402 cap than ${step.parentHandle}.`, i);
             }
             if (!expiryWithin(step.expiresAt ?? null, parent.expiresAt)) {
               add("error", "CHILD_OUTLIVES_PARENT", `${handle} cannot expire later than ${step.parentHandle}.`, i);
@@ -130,6 +144,7 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
         if (step.executor) executors.add(step.executor);
         agents.set(handle, {
           capabilities: step.capabilities,
+          x402: step.x402 ?? null,
           expiresAt: step.expiresAt ?? null,
           executor: step.executor,
           depth,
@@ -140,7 +155,11 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
       case "approve_recipient": {
         const rules = step.kind === "set_mandate" ? step.recipients : [step.rule];
         if (step.kind === "set_mandate") {
-          if (step.dailyCap <= 0n) add("error", "ZERO_CAP", "The daily budget must be greater than zero.", i);
+          mandated.add(step.agentHandle);
+          // A zero NEAR budget approves an agent for x402 only; it cannot list NEAR recipients.
+          if (step.dailyCap < 0n || (step.dailyCap === 0n && rules.length > 0)) {
+            add("error", "ZERO_CAP", "Approved recipients need a NEAR daily budget above zero.", i);
+          }
           if (rules.length > MAX_RECIPIENTS) {
             add("error", "TOO_MANY_RECIPIENTS", `A mandate can approve at most ${MAX_RECIPIENTS} recipients.`, i);
           }
@@ -188,6 +207,54 @@ export function validatePlan(plan: Plan, ctx: PlanContext): ValidationResult {
       case "set_account_daily_cap":
         if (step.cap !== null && step.cap <= 0n) add("error", "ZERO_CAP", "The account-wide cap must be greater than zero.", i);
         break;
+      case "set_x402_config":
+        if (!step.asset) add("error", "UNSUPPORTED_ACTION", "x402 needs the USDC contract for the network.", i);
+        if (step.asset === ctx.payer) add("error", "RECIPIENT_IS_PAYER", "The x402 token cannot be the payer's own account.", i);
+        if (step.accountDailyCap !== null && step.accountDailyCap <= 0n) {
+          add("error", "ZERO_CAP", "The account-wide x402 cap must be greater than zero.", i);
+        }
+        break;
+      case "set_x402_rules": {
+        const agent = agents.get(step.agentHandle);
+        if (agent && !mandated.has(step.agentHandle)) {
+          add("error", "X402_NEEDS_MANDATE", `${step.agentHandle} needs an approval (a mandate) before its x402 limits.`, i);
+        }
+        if (step.rules.dailyCap <= 0n) add("error", "ZERO_CAP", "The x402 daily budget must be greater than zero.", i);
+        if (step.rules.sellers.length > MAX_RECIPIENTS) {
+          add("error", "TOO_MANY_RECIPIENTS", `x402 rules can approve at most ${MAX_RECIPIENTS} sellers.`, i);
+        }
+        const capability = agent?.x402?.max_per_payment ?? null;
+        const limits = [...step.rules.sellers.map((s) => ({ who: s.seller, ...s })), ...(step.rules.unlisted ? [{ who: "Other sellers", ...step.rules.unlisted }] : [])];
+        const seen = new Set<string>();
+        for (const limit of limits) {
+          if (limit.who !== "Other sellers") {
+            if (seen.has(limit.who)) add("error", "DUPLICATE_RECIPIENT", `${limit.who} is listed twice.`, i);
+            seen.add(limit.who);
+            if (limit.who === ctx.payer) add("error", "RECIPIENT_IS_PAYER", "The payer cannot approve itself as a seller.", i);
+            if (executors.has(limit.who) || agent?.executor === limit.who) {
+              add("error", "RECIPIENT_IS_EXECUTOR", `${limit.who} is an agent executor. An agent must never be able to pay itself.`, i);
+            }
+          }
+          if (limit.perPaymentCap <= 0n || limit.dailyCap <= 0n) {
+            add("error", "ZERO_CAP", `${limit.who} needs a per-payment and a daily limit above zero.`, i);
+          }
+          if (limit.perPaymentCap > limit.dailyCap) {
+            add("error", "PER_PAYMENT_ABOVE_DAILY", `${limit.who}: the per-payment limit is above the daily limit.`, i);
+          }
+          if (capability !== null && limit.perPaymentCap > capability) {
+            add(
+              "warning",
+              "RULE_ABOVE_CAPABILITY",
+              `${limit.who} allows ${formatUsdc(limit.perPaymentCap)} USDC per payment, but the agent can only request ${formatUsdc(capability)} USDC.`,
+              i,
+            );
+          }
+        }
+        if (agent && capability === null) {
+          add("warning", "UNSUPPORTED_ACTION", `${step.agentHandle} has no x402 capability, so the registry refuses its x402 payments.`, i);
+        }
+        break;
+      }
     }
   });
   return finish(issues);
@@ -235,14 +302,21 @@ export async function validatePlanLive(plan: Plan, ctx: PlanContext, clients: Li
       }
       created.add(handle);
     }
-    if ((step.kind === "set_mandate" || step.kind === "approve_recipient") && !created.has(step.agentHandle)) {
+    if ((step.kind === "set_mandate" || step.kind === "approve_recipient" || step.kind === "set_x402_rules") && !created.has(step.agentHandle)) {
       if (!(await clients.registry.resolve(step.agentHandle))) {
         add("error", "UNKNOWN_AGENT", `${step.agentHandle} does not exist.`, i);
       }
     }
   }
 
-  const needsPolicy = plan.steps.some((s) => s.kind === "set_mandate" || s.kind === "approve_recipient" || s.kind === "set_account_daily_cap");
+  const needsPolicy = plan.steps.some(
+    (s) =>
+      s.kind === "set_mandate" ||
+      s.kind === "approve_recipient" ||
+      s.kind === "set_account_daily_cap" ||
+      s.kind === "set_x402_config" ||
+      s.kind === "set_x402_rules",
+  );
   if (needsPolicy) {
     const state = await clients.policy.state(clients.expectedPolicyCodeHash);
     if (state.kind === "none") {

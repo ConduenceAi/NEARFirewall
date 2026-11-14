@@ -69,6 +69,7 @@ fn register(
         None,
         None,
         Some("test agent".into()),
+        None,
     )
 }
 
@@ -86,6 +87,7 @@ fn child(
         label.into(),
         Some(acc(executor)),
         caps(max),
+        None,
         None,
         None,
         None,
@@ -182,6 +184,7 @@ fn registration_requires_a_storage_deposit() {
         None,
         None,
         None,
+        None,
     );
 }
 
@@ -218,6 +221,7 @@ fn no_transfer_lock_blocks_approvals() {
         caps(3),
         None,
         Some(LOCK_NO_TRANSFER),
+        None,
         None,
     );
     call(&alice(), NEAR, T0);
@@ -441,6 +445,7 @@ fn expired_agents_are_rejected() {
         Some(T0 + 100),
         None,
         None,
+        None,
     );
     call(&runner(), 0, T0 + 100);
     let outcome = r.execute(
@@ -562,6 +567,7 @@ fn children_cannot_outlive_their_parent() {
         Some(T0 + 1000),
         None,
         None,
+        None,
     );
     call(&alice(), NEAR, T0);
     r.create_child(
@@ -569,6 +575,7 @@ fn children_cannot_outlive_their_parent() {
         "bot-1".into(),
         Some(acc("runner-1.testnet")),
         caps(1),
+        None,
         None,
         None,
         None,
@@ -797,6 +804,7 @@ fn expiry_never_moves_earlier() {
         Some(T0 + 1000),
         None,
         None,
+        None,
     );
     call(&alice(), 1, T0);
     r.extend_expiry("1".into(), Some(T0 + 2000));
@@ -905,7 +913,7 @@ fn the_owner_is_readable() {
 fn agents_without_an_executor_cannot_execute() {
     let mut r = setup();
     call(&alice(), NEAR, T0);
-    let view = r.register_agent("trader".into(), None, caps(3), None, None, None);
+    let view = r.register_agent("trader".into(), None, caps(3), None, None, None, None);
     assert_eq!(view.executor, None);
     assert_eq!(
         exec_as(
@@ -924,9 +932,18 @@ fn agents_without_an_executor_cannot_execute() {
 fn authorize_returns_the_path_to_the_owner() {
     let mut r = setup();
     call(&alice(), NEAR, T0);
-    r.register_agent("desk".into(), None, caps(3), None, None, None);
+    r.register_agent("desk".into(), None, caps(3), None, None, None, None);
     call(&alice(), NEAR, T0);
-    r.create_child("1".into(), "bot-1".into(), None, caps(2), None, None, None);
+    r.create_child(
+        "1".into(),
+        "bot-1".into(),
+        None,
+        caps(2),
+        None,
+        None,
+        None,
+        None,
+    );
     call(&alice(), 0, T0);
     match r.authorize("2".into(), transfer("vendor.testnet", 2), rid(1)) {
         Authorization::Allowed { path } => assert_eq!(path_ids(&path), vec!["1", "2"]),
@@ -939,7 +956,7 @@ fn authorize_returns_the_path_to_the_owner() {
 fn authorize_refuses_other_callers_without_writing() {
     let mut r = setup();
     call(&alice(), NEAR, T0);
-    r.register_agent("trader".into(), None, caps(3), None, None, None);
+    r.register_agent("trader".into(), None, caps(3), None, None, None, None);
     call(&bob(), 0, T0);
     assert_eq!(
         r.authorize("1".into(), transfer("vendor.testnet", 1), rid(1)),
@@ -955,9 +972,18 @@ fn authorize_refuses_other_callers_without_writing() {
 fn authorize_applies_the_path_checks() {
     let mut r = setup();
     call(&alice(), NEAR, T0);
-    r.register_agent("desk".into(), None, caps(3), None, None, None);
+    r.register_agent("desk".into(), None, caps(3), None, None, None, None);
     call(&alice(), NEAR, T0);
-    r.create_child("1".into(), "bot-1".into(), None, caps(3), None, None, None);
+    r.create_child(
+        "1".into(),
+        "bot-1".into(),
+        None,
+        caps(3),
+        None,
+        None,
+        None,
+        None,
+    );
     call(&alice(), 0, T0);
     assert!(matches!(
         r.authorize("2".into(), transfer("vendor.testnet", 4), rid(1)),
@@ -1000,7 +1026,7 @@ fn authorize_applies_the_path_checks() {
 fn authorize_refuses_an_agent_the_owner_no_longer_holds() {
     let mut r = setup();
     call(&alice(), NEAR, T0);
-    r.register_agent("trader".into(), None, caps(3), None, None, None);
+    r.register_agent("trader".into(), None, caps(3), None, None, None, None);
     call(&alice(), 1, T0);
     r.nft_transfer(bob(), "1".into(), None, None);
     call(&alice(), 0, T0);
@@ -1011,4 +1037,187 @@ fn authorize_refuses_an_agent_the_owner_no_longer_holds() {
             ..
         }
     ));
+}
+
+// ---------------------------------------------------------------- x402 capability
+
+const USDC: u128 = 1_000_000;
+
+fn x402_cap(max_usdc_cents: u128) -> Option<CapX402> {
+    Some(CapX402 {
+        max_per_payment: U128(max_usdc_cents * USDC / 100),
+    })
+}
+
+fn x402_pay(seller: &str, cents: u128) -> Action {
+    Action::X402Pay {
+        asset: acc("usdc.testnet"),
+        pay_to: acc(seller),
+        amount: U128(cents * USDC / 100),
+    }
+}
+
+fn reason_of_auth(auth: Authorization) -> Option<Reason> {
+    match auth {
+        Authorization::Denied { reason, .. } => Some(reason),
+        Authorization::Allowed { .. } => None,
+    }
+}
+
+#[test]
+fn x402_is_refused_without_a_capability() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    // A NEAR capability does not allow x402.
+    r.register_agent("trader".into(), None, caps(3), None, None, None, None);
+    assert_eq!(r.get_agent("1".into()).unwrap().x402, None);
+    call(&alice(), 0, T0);
+    assert_eq!(
+        reason_of_auth(r.authorize("1".into(), x402_pay("seller.testnet", 5), rid(1))),
+        Some(Reason::ActionNotAllowed)
+    );
+}
+
+#[test]
+fn x402_capability_caps_each_payment() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    let view = r.register_agent(
+        "trader".into(),
+        None,
+        Capabilities::default(),
+        None,
+        None,
+        None,
+        x402_cap(10),
+    );
+    assert_eq!(view.x402, x402_cap(10));
+    call(&alice(), 0, T0);
+    assert_eq!(
+        reason_of_auth(r.authorize("1".into(), x402_pay("seller.testnet", 10), rid(1))),
+        None
+    );
+    assert_eq!(
+        reason_of_auth(r.authorize("1".into(), x402_pay("seller.testnet", 11), rid(2))),
+        Some(Reason::CapExceeded)
+    );
+    // The x402 activity entry is recorded like any other.
+    assert_eq!(
+        r.get_activity("1".into(), None)[0].action,
+        x402_pay("seller.testnet", 11)
+    );
+    // NEAR stays refused: the agent has no NEAR capability.
+    assert_eq!(
+        reason_of_auth(r.authorize("1".into(), transfer("vendor.testnet", 1), rid(3))),
+        Some(Reason::ActionNotAllowed)
+    );
+}
+
+#[test]
+fn x402_children_only_narrow_and_parents_limit_the_branch() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent("desk".into(), None, caps(3), None, None, None, x402_cap(10));
+    call(&alice(), NEAR, T0);
+    r.create_child(
+        "1".into(),
+        "bot-1".into(),
+        None,
+        caps(3),
+        None,
+        None,
+        None,
+        x402_cap(10),
+    );
+    // Narrowing the parent later narrows the whole branch at the next request.
+    call(&alice(), 1, T0);
+    r.set_x402_capability("1".into(), x402_cap(5));
+    call(&alice(), 0, T0);
+    match r.authorize("2".into(), x402_pay("seller.testnet", 6), rid(1)) {
+        Authorization::Denied { reason, detail } => {
+            assert_eq!(reason, Reason::CapExceeded);
+            assert_eq!(detail.as_deref(), Some("limited by agent 1"));
+        }
+        other => panic!("expected denied, got {other:?}"),
+    }
+    assert_eq!(
+        reason_of_auth(r.authorize("2".into(), x402_pay("seller.testnet", 5), rid(2))),
+        None
+    );
+}
+
+#[test]
+#[should_panic(expected = "A child cannot be wider than its parent")]
+fn x402_child_wider_than_parent_is_refused() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent("desk".into(), None, caps(3), None, None, None, x402_cap(10));
+    call(&alice(), NEAR, T0);
+    r.create_child(
+        "1".into(),
+        "bot-1".into(),
+        None,
+        caps(3),
+        None,
+        None,
+        None,
+        x402_cap(11),
+    );
+}
+
+#[test]
+#[should_panic(expected = "A child cannot be wider than its parent")]
+fn x402_child_of_a_parent_without_x402_is_refused() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent("desk".into(), None, caps(3), None, None, None, None);
+    call(&alice(), NEAR, T0);
+    r.create_child(
+        "1".into(),
+        "bot-1".into(),
+        None,
+        caps(3),
+        None,
+        None,
+        None,
+        x402_cap(1),
+    );
+}
+
+#[test]
+#[should_panic(expected = "This agent's capabilities can only narrow")]
+fn x402_capability_respects_the_no_raise_lock() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent(
+        "trader".into(),
+        None,
+        caps(3),
+        None,
+        Some(LOCK_NO_CAPABILITY_RAISE),
+        None,
+        x402_cap(10),
+    );
+    call(&alice(), 1, T0);
+    r.set_x402_capability("1".into(), x402_cap(5));
+    call(&alice(), 1, T0);
+    r.set_x402_capability("1".into(), x402_cap(6));
+}
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn x402_capability_changes_need_the_holders_full_access_key() {
+    let mut r = setup();
+    call(&alice(), NEAR, T0);
+    r.register_agent(
+        "trader".into(),
+        None,
+        caps(3),
+        None,
+        None,
+        None,
+        x402_cap(10),
+    );
+    call(&alice(), 0, T0);
+    r.set_x402_capability("1".into(), x402_cap(20));
 }

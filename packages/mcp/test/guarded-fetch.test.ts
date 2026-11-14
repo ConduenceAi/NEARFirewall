@@ -132,3 +132,40 @@ describe("guardedFetch", () => {
     expect(requests).toEqual([]);
   });
 });
+
+describe("guardedFetch headers (x402)", () => {
+  const servers: http.Server[] = [];
+  const listen = async (handler: http.RequestListener) => {
+    const s = http.createServer(handler);
+    servers.push(s);
+    await new Promise<void>((resolve) => s.listen(0, "127.0.0.1", resolve));
+    return `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
+  };
+  afterAll(() => servers.forEach((s) => s.close()));
+
+  it("sends extra headers, returns response headers, and never forwards them to another origin", async () => {
+    const seenByOther: (string | undefined)[] = [];
+    const other = await listen((req, res) => {
+      seenByOther.push(req.headers["payment-signature"] as string | undefined);
+      res.end("other");
+    });
+    const seller = await listen((req, res) => {
+      if (req.url === "/away") {
+        res.statusCode = 302;
+        res.setHeader("location", `${other}/landing`);
+        return res.end();
+      }
+      res.statusCode = req.headers["payment-signature"] === "sig" ? 200 : 402;
+      res.setHeader("payment-required", "challenge");
+      res.setHeader("content-type", "application/json");
+      res.end("{}");
+    });
+    const unpaid = await guardedFetch(`${seller}/report`, { allowPrivate: true });
+    expect(unpaid.status).toBe(402);
+    expect(unpaid.headers?.["payment-required"]).toBe("challenge");
+    const paid = await guardedFetch(`${seller}/report`, { allowPrivate: true, headers: { "PAYMENT-SIGNATURE": "sig" } });
+    expect(paid.status).toBe(200);
+    await guardedFetch(`${seller}/away`, { allowPrivate: true, headers: { "PAYMENT-SIGNATURE": "sig" } });
+    expect(seenByOther).toEqual([undefined]);
+  });
+});

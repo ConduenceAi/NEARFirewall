@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it } from "vitest";
 import { parseNear, type AgentConnection } from "@nearfirewall/sdk";
+import type { X402Buyer } from "@nearfirewall/x402";
 import { createServer } from "../src/server.ts";
 
 /** A stand-in for AgentConnection with canned answers. */
@@ -170,5 +171,100 @@ describe("NEARFirewall MCP server", () => {
     const client = await connect(fakeConnection());
     const r = await client.callTool({ name: "pay", arguments: { recipient: "vendor.testnet", amount_near: "lots" } });
     expect(r.isError).toBe(true);
+  });
+});
+
+describe("x402 tools", () => {
+  const rules = {
+    enabled: true,
+    asset: "usdc.testnet",
+    maxPerPayment: 500_000n,
+    sellers: [{ seller: "known.testnet", perPayment: 200_000n, daily: 500_000n, usedToday: 0n }],
+    unlisted: { perPayment: 50_000n, daily: 100_000n, usedToday: 50_000n },
+    budgets: [{ agentId: "1", handle: "trader", daily: 1_000_000n, usedToday: 50_000n }],
+    account: { daily: null, usedToday: 50_000n },
+    paymentAccount: "ab".repeat(32),
+    paymentAccountReady: true,
+    unspent: 0n,
+  };
+
+  /** A buyer that runs one request through the transport it is given, and reports a payment. */
+  function fakeBuyer() {
+    const fetched: { url: string; maxAmount: bigint | null | undefined }[] = [];
+    const buyer = {
+      fetched,
+      async fetch(url: string, opts: { transport: (r: { url: string; headers: Record<string, string> }) => Promise<any>; maxAmount?: bigint | null }) {
+        fetched.push({ url, maxAmount: opts.maxAmount });
+        const response = await opts.transport({ url, headers: { "PAYMENT-SIGNATURE": "sig" } });
+        return {
+          status: "paid",
+          response,
+          payment: { resource: url, payTo: "seller.testnet", amount: 50_000n, asset: "usdc.testnet", requestId: "b".repeat(64), settlement: { success: true, transaction: "tx7", network: "near:testnet" } },
+        };
+      },
+      async returnUnspent() {
+        return { amount: 20_000n, txHash: "tx8" };
+      },
+    };
+    return buyer as unknown as X402Buyer & { fetched: typeof fetched };
+  }
+
+  async function connectWith(buyer: X402Buyer, fetchPage?: any) {
+    const connection = fakeConnection();
+    (connection as any).x402Rules = async () => rules;
+    (connection as any).activity = async () => [
+      { seq: 1n, at: 0n, leaf: "1", request_id: "x", recipient: "seller.testnet", amount: 50_000n, outcome: "settled", reason: null, via: { kind: "x402", public_key: "ed25519:x", label: "Claude", payment_account: "ab".repeat(32) } },
+    ];
+    const server = createServer(connection, { x402: buyer, fetchPage });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(b);
+    const client = new Client({ name: "x", version: "1" });
+    await client.connect(a);
+    return client;
+  }
+
+  it("adds fetch_paid and return_unspent_usdc only when x402 is configured, with no key inputs", async () => {
+    const client = await connectWith(fakeBuyer());
+    const { tools } = await client.listTools();
+    expect(tools.map((t) => t.name)).toEqual(expect.arrayContaining(["fetch_paid", "return_unspent_usdc"]));
+    for (const tool of tools) expect(JSON.stringify(tool.inputSchema)).not.toMatch(/key|secret|private/i);
+  });
+
+  it("explains the x402 rules, including the budget for unlisted sellers", async () => {
+    const client = await connectWith(fakeBuyer());
+    const t = textOf(await client.callTool({ name: "get_rules", arguments: {} }));
+    expect(t).toContain("x402 payments in USDC (fetch_paid):");
+    expect(t).toContain("Approved seller known.testnet: up to 0.2 USDC each, 0.5 per day");
+    expect(t).toContain("Any other seller: up to 0.05 USDC each, 0.1 USDC per day for all of them together (0.05 used today)");
+  });
+
+  it("pays through the owner's browsing rules and labels the content as untrusted", async () => {
+    const pages: { url: string; headers?: Record<string, string> }[] = [];
+    const buyer = fakeBuyer();
+    const client = await connectWith(buyer, async (url: string, opts: any) => {
+      pages.push({ url, headers: opts.headers });
+      return { status: 200, url, contentType: "text/plain", text: "the report", truncated: false, headers: {} };
+    });
+    const result = await client.callTool({ name: "fetch_paid", arguments: { url: "https://docs.near.org/report", max_usdc: "0.05" } });
+    expect(result.isError).toBeFalsy();
+    const t = textOf(result);
+    expect(t).toContain("Paid 0.05 USDC to seller.testnet through x402");
+    expect(t).toContain("Untrusted web content");
+    expect(buyer.fetched).toEqual([{ url: "https://docs.near.org/report", maxAmount: 50_000n }]);
+    expect(pages[0]!.headers).toEqual({ "PAYMENT-SIGNATURE": "sig" });
+  });
+
+  it("refuses sites outside the browsing rules before any payment", async () => {
+    const buyer = fakeBuyer();
+    const client = await connectWith(buyer);
+    const r = await client.callTool({ name: "fetch_paid", arguments: { url: "https://elsewhere.com/report" } });
+    expect(r.isError).toBe(true);
+    expect(buyer.fetched).toHaveLength(0);
+  });
+
+  it("shows x402 activity in USDC and returns unspent USDC to the owner", async () => {
+    const client = await connectWith(fakeBuyer());
+    expect(textOf(await client.callTool({ name: "list_activity", arguments: {} }))).toContain("0.05 USDC → seller.testnet (x402)");
+    expect(textOf(await client.callTool({ name: "return_unspent_usdc", arguments: {} }))).toContain("Returned 0.02 USDC to the owner");
   });
 });

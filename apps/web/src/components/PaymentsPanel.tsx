@@ -28,6 +28,7 @@ import { useAction, useAsync } from "../hooks.ts";
 import { useWallet } from "../wallet.tsx";
 import { VendorsWizard } from "./VendorsWizard.tsx";
 import { Safeguards } from "./Safeguards.tsx";
+import { X402Section } from "./X402Panel.tsx";
 
 type Execute = (label: string, tx: WalletTransaction | (() => WalletTransaction | Promise<WalletTransaction>), handle?: (value: unknown) => void) => Promise<boolean>;
 
@@ -161,6 +162,7 @@ function Policy({ policy, busy, exec, onPendingChanged }: { policy: PolicyClient
         <MandateCard key={agent.agent_id} agent={agent} policy={policy} busy={busy} exec={exec} confirmations={v?.pending !== undefined} />
       ))}
       {compatible && <VendorsWizard payer={payer} busy={busy} confirmations={v?.pending !== undefined} onSigned={() => { view.reload(); agents.reload(); }} />}
+      {compatible && <X402Section policy={policy} agents={agents.data ?? []} busy={busy} exec={exec} />}
     </>
   );
 }

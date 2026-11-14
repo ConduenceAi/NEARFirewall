@@ -15,6 +15,7 @@ COPY package.json package-lock.json ./
 COPY packages/sdk/package.json packages/sdk/
 COPY packages/mcp/package.json packages/mcp/
 COPY packages/templates/package.json packages/templates/
+COPY packages/x402/package.json packages/x402/
 COPY apps/gateway/package.json apps/gateway/
 COPY apps/runner/package.json apps/runner/
 COPY apps/web/package.json apps/web/
@@ -23,6 +24,7 @@ RUN npm ci --omit=dev --workspace @nearfirewall/gateway --include-workspace-root
 
 COPY packages/sdk/src packages/sdk/src
 COPY packages/mcp/src packages/mcp/src
+COPY packages/x402/src packages/x402/src
 COPY apps/gateway/src apps/gateway/src
 
 USER node

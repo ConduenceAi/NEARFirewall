@@ -82,6 +82,33 @@ The Docs page describes local MCP setup and connected-key payments. The catalog 
 
 **Phase D0 (done 2026-11-13).** The Docs page has "How it works", with four figures: the parts, a payment step by step, which rule wins, and generations and approvals. The README has the matching ASCII diagrams. Each later phase adds its own docs section when it ships.
 
+## Revision 3 (2026-11-14): x402 payments in USDC
+
+Agents pay each other, and any x402 seller, in USDC on NEAR, within on-chain limits. The owner chose:
+- **USDC only, for standard x402 compatibility.** Any seller that accepts USDC on NEAR through x402 can be paid.
+- **A small budget for unknown counterparties**, instead of requiring every seller to be approved first.
+
+**The constraint that shapes the design.** A standard NEAR x402 payment is a NEP-366 delegate for one NEP-141 `ft_transfer`, with 1 yoctoNEAR attached. Facilitators accept it only from a full-access key on the paying account; they reject function-call keys. A delegate like that never passes through the policy. So the agent's key must never be able to sign one for the owner's account.
+
+**The design.** Each connection key also controls its own payment account: the implicit account of that key, so the policy derives it and stores nothing. For each payment:
+1. The agent calls `agent_execute(X402Pay { asset, pay_to, amount })`.
+2. The registry checks the agent's path and its x402 cap.
+3. The policy checks its x402 rules, reserves the amount, and moves exactly that much USDC to the payment account.
+4. The agent signs the seller's standard payload from the payment account.
+
+The account holds nothing between payments, so a stolen key can take at most the payment just approved.
+
+| Phase | Goal | Status |
+| --- | --- | --- |
+| X1 | Types and registry: `Action::X402Pay`, `CapX402` stored outside `AgentRecord` (no migration), `set_x402_capability`, optional `x402` on `register_agent` and `create_child`, children only narrow, path check on every node | Done. Unit tests pass. |
+| X2 | Policy: `set_x402_config`, `set_x402_rules` (branch daily budget, approved sellers, an unlisted per-payment cap and one shared daily pool), `approve_x402_seller`, `remove_x402_seller`, `remove_x402_rules`, `setup_x402_account`, x402 views, funding through `ft_transfer`, settlement and release, and `Via::X402` so x402 activity is read in USDC. A mandate with a zero NEAR budget approves an agent for x402 only. All new state lives under new storage prefixes, so existing policies upgrade in place. | Done. 28 new unit tests. Not deployed. |
+| X3 | SDK (`x402.ts`, builders, `AgentConnection.x402Rules`, `fundX402`, `previewX402`) and `@nearfirewall/x402` (wire format, delegate signing, `X402Buyer`, `createPaywall`, facilitator client) | Done. The delegate signature is verified in tests, and the buyer and paywall run end to end against a mocked chain and facilitator. |
+| X4 | MCP `fetch_paid` and `return_unspent_usdc`, x402 lines in `get_rules`; gateway `POST /api/x402/fetch` with one payment at a time per key | Done, tested with mocks |
+| X5 | App: x402 section under Payments, the x402 cap at registration, USDC amounts in Activity and the inspector; **x402 buyer** template | Built and type-checked. Not tried in a browser. |
+| X6 | Testnet: fresh owner account (registries without keys cannot be upgraded), Testnet USDC, a facilitator API key or a self-hosted facilitator, one paid request between two agents | Not started |
+
+Out of scope for now: "ask me first" for x402 (a seller waits seconds), seller identity checks beyond the seller's account, and reusing USDC left in a payment account (it is returned to the owner instead).
+
 ### R1: user-owned registry
 
 **Contract (`contracts/registry`):**

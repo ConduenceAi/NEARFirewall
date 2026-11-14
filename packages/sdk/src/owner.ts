@@ -7,7 +7,7 @@
  * attach deposits.
  */
 import { ONE_YOCTO, TGAS, nsToJson, parseNear } from "./amounts.ts";
-import type { Action, Capabilities, PathNode } from "./types.ts";
+import type { Action, CapX402, Capabilities, PathNode } from "./types.ts";
 
 export type WalletAction =
   | {
@@ -68,6 +68,9 @@ export function toWireCapabilities(caps: Capabilities): Record<string, unknown> 
 }
 
 export function toWireAction(action: Action): Record<string, unknown> {
+  if (action.type === "X402Pay") {
+    return { type: action.type, asset: action.asset, pay_to: action.pay_to, amount: action.amount.toString() };
+  }
   return { type: action.type, recipient: action.recipient, amount: action.amount.toString() };
 }
 
@@ -75,12 +78,21 @@ export function transferCapability(maxPerPayment: bigint): Capabilities {
   return { transfer_near: { max_per_payment: maxPerPayment } };
 }
 
+/** The largest x402 payment an agent may request, in USDC's smallest unit. */
+export function x402Capability(maxPerPayment: bigint): CapX402 {
+  return { max_per_payment: maxPerPayment };
+}
+
+const wireX402Cap = (cap: CapX402 | null | undefined) => (cap ? { max_per_payment: cap.max_per_payment.toString() } : null);
+
 // ------------------------------------------------------------------ registry
 
 export interface AgentInput {
   /** Executor account for the registry's `execute`. Leave empty for agents that act only through connection keys. */
   executor?: string | null;
   capabilities: Capabilities;
+  /** The largest x402 payment the agent may request. Leave empty to refuse x402. */
+  x402?: CapX402 | null;
   expiresAt?: bigint | null;
   locks?: number;
   description?: string | null;
@@ -93,6 +105,8 @@ function agentArgs(input: AgentInput) {
     expires_at: nsToJson(input.expiresAt),
     locks: input.locks ?? null,
     description: input.description ?? null,
+    // Sent only when set, so registries deployed before x402 accept the call unchanged.
+    ...(input.x402 ? { x402: wireX402Cap(input.x402) } : {}),
   };
 }
 
@@ -130,6 +144,9 @@ export const removeAgent = (registryId: string, agentId: string) =>
   oneYoctoCall(registryId, "remove_agent", { agent_id: agentId });
 export const setCapabilities = (registryId: string, agentId: string, capabilities: Capabilities) =>
   oneYoctoCall(registryId, "set_capabilities", { agent_id: agentId, capabilities: toWireCapabilities(capabilities) });
+/** Sets the largest x402 payment an agent may request; `null` refuses x402. */
+export const setX402Capability = (registryId: string, agentId: string, cap: CapX402 | null) =>
+  oneYoctoCall(registryId, "set_x402_capability", { agent_id: agentId, x402: wireX402Cap(cap) });
 export const extendExpiry = (registryId: string, agentId: string, expiresAt: bigint | null) =>
   oneYoctoCall(registryId, "extend_expiry", { agent_id: agentId, expires_at: nsToJson(expiresAt) });
 export const burnLocks = (registryId: string, agentId: string, locks: number) =>
@@ -350,6 +367,12 @@ export interface ConnectionInput {
   platform: string;
   label: string;
   allowance?: bigint;
+  /**
+   * Also prepare the key's x402 payment account in the same transaction. Only
+   * set this when x402 is already on (`setX402Config`): otherwise the whole
+   * transaction fails and the key is not connected.
+   */
+  x402?: boolean;
 }
 
 /**
@@ -376,8 +399,69 @@ export function connectAgentKey(ownerId: string, input: ConnectionInput): Wallet
         { agent_id: input.agentId, public_key: input.publicKey, platform: input.platform, label: input.label },
         ONE_YOCTO,
       ),
+      ...(input.x402 ? [setupX402Action(input.publicKey)] : []),
     ],
   };
+}
+
+// ------------------------------------------------------------------ x402
+
+const X402_SETUP_GAS = 60n * TGAS;
+
+function setupX402Action(publicKey: string): WalletAction {
+  return call("setup_x402_account", { public_key: publicKey }, ONE_YOCTO, X402_SETUP_GAS);
+}
+
+/**
+ * Turns x402 on for the account, paid in `asset` (the USDC contract for the
+ * network, see `USDC_CONTRACT`), with an optional cap on all x402 payments per
+ * day. `asset: null` turns x402 off for every agent.
+ */
+export const setX402Config = (payerId: string, asset: string | null, accountDailyCap: bigint | null = null) =>
+  oneYoctoCall(payerId, "set_x402_config", {
+    asset,
+    account_daily_cap: accountDailyCap === null ? null : accountDailyCap.toString(),
+  });
+
+export interface X402LimitInput {
+  perPaymentCap: bigint;
+  dailyCap: bigint;
+}
+
+export interface X402RulesInput {
+  /** Shared daily pool for x402 payments by the agent's branch. */
+  dailyCap: bigint;
+  /** Sellers approved by name, each with its own limits. */
+  sellers: ({ seller: string } & X402LimitInput)[];
+  /** Any other seller: a small per-payment cap and one daily pool shared by all of them. `null` refuses them. */
+  unlisted: X402LimitInput | null;
+}
+
+const wireLimit = (l: X402LimitInput) => ({ per_payment_cap: l.perPaymentCap.toString(), daily_cap: l.dailyCap.toString() });
+
+/** Sets an agent's x402 rules. The agent needs an active, editable mandate (`setMandate`). */
+export const setX402Rules = (payerId: string, agentId: string, rules: X402RulesInput) =>
+  oneYoctoCall(payerId, "set_x402_rules", {
+    agent_id: agentId,
+    daily_cap: rules.dailyCap.toString(),
+    sellers: rules.sellers.map((s) => ({ seller: s.seller, ...wireLimit(s) })),
+    unlisted: rules.unlisted ? wireLimit(rules.unlisted) : null,
+  });
+
+export const approveX402Seller = (payerId: string, agentId: string, seller: string, limit: X402LimitInput) =>
+  oneYoctoCall(payerId, "approve_x402_seller", { agent_id: agentId, seller, ...wireLimit(limit) });
+export const removeX402Seller = (payerId: string, agentId: string, seller: string) =>
+  oneYoctoCall(payerId, "remove_x402_seller", { agent_id: agentId, seller });
+export const removeX402Rules = (payerId: string, agentId: string) =>
+  oneYoctoCall(payerId, "remove_x402_rules", { agent_id: agentId });
+
+/**
+ * Prepares a connected key's x402 payment account (its implicit account):
+ * funds it with 0.01 NEAR, which creates it, and registers it with the token.
+ */
+export function setupX402Account(ownerId: string, publicKey: string): WalletTransaction {
+  if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(publicKey)) throw new Error("x402 needs an ed25519 connection key");
+  return { receiverId: ownerId, actions: [setupX402Action(publicKey)] };
 }
 
 /**

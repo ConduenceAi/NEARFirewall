@@ -60,6 +60,19 @@ export function ConnectPanel({ agent, accountId, onClose, onChanged }: {
     onChanged();
   }
 
+  // The wallet returns as soon as the transaction is accepted; the final-block
+  // state the check reads follows a few seconds later, so retry before failing.
+  async function verifyAfterSigning(publicKey: string) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await verify(publicKey);
+      } catch (error) {
+        if (attempt >= 8) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    }
+  }
+
   async function create() {
     if (!platform?.setup && !platform?.gateway) return;
     await action.run("Connect agent", async () => {
@@ -71,7 +84,7 @@ export function ConnectPanel({ agent, accountId, onClose, onChanged }: {
       const tx = connectAgentKey(accountId, { agentId: agent.agent_id, publicKey: pair.publicKey, platform: platform.id, label: name, allowance: fees });
       setKey(pair);
       ensureOk(await send(tx));
-      await verify(pair.publicKey);
+      await verifyAfterSigning(pair.publicKey);
     });
   }
 

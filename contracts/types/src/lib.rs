@@ -40,18 +40,63 @@ pub fn is_valid_request_id(id: &str) -> bool {
 pub enum Action {
     /// Send native NEAR from the payer's account.
     TransferNear { recipient: AccountId, amount: U128 },
+    /// Fund one x402 payment. The payer's policy checks `pay_to` (the seller) and
+    /// `amount` (in the token's smallest unit) against its x402 rules, then moves
+    /// exactly `amount` of `asset` from the payer's account to the connection's
+    /// x402 payment account, which signs the seller's transfer. Appended after
+    /// `TransferNear`: the enum is stored in Borsh, so never reorder.
+    X402Pay {
+        asset: AccountId,
+        pay_to: AccountId,
+        amount: U128,
+    },
 }
 
 impl Action {
     pub fn amount(&self) -> u128 {
         match self {
-            Action::TransferNear { amount, .. } => amount.0,
+            Action::TransferNear { amount, .. } | Action::X402Pay { amount, .. } => amount.0,
         }
     }
 
+    /// Who is paid in the end: the NEAR recipient, or the x402 seller.
     pub fn recipient(&self) -> &AccountId {
         match self {
             Action::TransferNear { recipient, .. } => recipient,
+            Action::X402Pay { pay_to, .. } => pay_to,
+        }
+    }
+
+    pub fn is_x402(&self) -> bool {
+        matches!(self, Action::X402Pay { .. })
+    }
+}
+
+/// The largest x402 payment an agent may request, in the token's smallest unit
+/// (USDC has 6 decimals). Stored apart from [`Capabilities`], which is part of
+/// every stored agent record, so adding x402 does not change that layout.
+#[near(serializers = [borsh, json])]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapX402 {
+    pub max_per_payment: U128,
+}
+
+impl CapX402 {
+    /// Returns true when `inner` allows nothing that `outer` refuses.
+    pub fn is_within(inner: Option<&CapX402>, outer: Option<&CapX402>) -> bool {
+        match (inner, outer) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(inner), Some(outer)) => inner.max_per_payment.0 <= outer.max_per_payment.0,
+        }
+    }
+
+    /// Checks one x402 amount against an agent's capability.
+    pub fn allows(cap: Option<&CapX402>, amount: u128) -> Result<(), Reason> {
+        match cap {
+            None => Err(Reason::ActionNotAllowed),
+            Some(cap) if amount > cap.max_per_payment.0 => Err(Reason::CapExceeded),
+            Some(_) => Ok(()),
         }
     }
 }
@@ -88,6 +133,8 @@ impl Capabilities {
                 Some(cap) if amount.0 > cap.max_per_payment.0 => Err(Reason::CapExceeded),
                 Some(_) => Ok(()),
             },
+            // The registry checks x402 against the agent's separate `CapX402`.
+            Action::X402Pay { .. } => Err(Reason::ActionNotAllowed),
         }
     }
 }
@@ -211,6 +258,13 @@ pub enum Reason {
     ConfirmationExpired,
     TooManyPending,
     RecipientBlocked,
+    // x402. Appended for the same reason.
+    /// The payer has not turned x402 on, or an approval on the path has no x402 rules.
+    X402NotEnabled,
+    /// The seller asked for a token other than the payer's x402 token.
+    AssetNotAccepted,
+    /// The shared daily budget for sellers the owner has not listed is used up.
+    UnlistedDailyCap,
 }
 
 impl Reason {
@@ -250,6 +304,9 @@ impl Reason {
             Reason::ConfirmationExpired => "CONFIRMATION_EXPIRED",
             Reason::TooManyPending => "TOO_MANY_PENDING",
             Reason::RecipientBlocked => "RECIPIENT_BLOCKED",
+            Reason::X402NotEnabled => "X402_NOT_ENABLED",
+            Reason::AssetNotAccepted => "ASSET_NOT_ACCEPTED",
+            Reason::UnlistedDailyCap => "UNLISTED_DAILY_CAP",
         }
     }
 }
@@ -331,9 +388,52 @@ mod tests {
             Reason::UnknownConnection,
             Reason::TooManyPending,
             Reason::RecipientBlocked,
+            Reason::X402NotEnabled,
+            Reason::AssetNotAccepted,
+            Reason::UnlistedDailyCap,
         ] {
             let json = near_sdk::serde_json::to_string(&reason).unwrap();
             assert_eq!(json, format!("\"{}\"", reason.code()));
         }
+    }
+
+    #[test]
+    fn x402_action_shape() {
+        let action: Action = near_sdk::serde_json::from_str(
+            r#"{"type":"X402Pay","asset":"usdc.testnet","pay_to":"seller.testnet","amount":"50000"}"#,
+        )
+        .unwrap();
+        assert!(action.is_x402());
+        assert_eq!(action.amount(), 50_000);
+        assert_eq!(action.recipient().as_str(), "seller.testnet");
+        // Existing NEAR capabilities never allow x402 on their own.
+        assert_eq!(
+            caps(Some(u128::MAX)).allows(&action),
+            Err(Reason::ActionNotAllowed)
+        );
+        // Borsh keeps the original variant first, so stored NEAR actions still decode.
+        let near = Action::TransferNear {
+            recipient: "a.testnet".parse().unwrap(),
+            amount: U128(1),
+        };
+        assert_eq!(near_sdk::borsh::to_vec(&near).unwrap()[0], 0);
+        assert_eq!(near_sdk::borsh::to_vec(&action).unwrap()[0], 1);
+    }
+
+    #[test]
+    fn x402_capability() {
+        let cap = |m| CapX402 {
+            max_per_payment: U128(m),
+        };
+        assert_eq!(CapX402::allows(Some(&cap(10)), 10), Ok(()));
+        assert_eq!(
+            CapX402::allows(Some(&cap(10)), 11),
+            Err(Reason::CapExceeded)
+        );
+        assert_eq!(CapX402::allows(None, 1), Err(Reason::ActionNotAllowed));
+        assert!(CapX402::is_within(None, None));
+        assert!(CapX402::is_within(Some(&cap(5)), Some(&cap(5))));
+        assert!(!CapX402::is_within(Some(&cap(6)), Some(&cap(5))));
+        assert!(!CapX402::is_within(Some(&cap(1)), None));
     }
 }

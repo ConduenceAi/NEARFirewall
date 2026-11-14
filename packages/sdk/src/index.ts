@@ -8,3 +8,4 @@ export * from "./connection.ts";
 export * from "./access.ts";
 export * from "./reasons.ts";
 export * from "./manifest.ts";
+export * from "./x402.ts";

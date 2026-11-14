@@ -22,6 +22,8 @@ export interface GuardedFetchOptions {
   maxBytes?: number;
   maxRedirects?: number;
   timeoutMs?: number;
+  /** Extra request headers, such as an x402 payment. Never sent on to another origin after a redirect. */
+  headers?: Record<string, string>;
   /** For tests only: allow private and loopback addresses. */
   allowPrivate?: boolean;
 }
@@ -32,6 +34,8 @@ export interface GuardedFetchResult {
   contentType: string;
   text: string;
   truncated: boolean;
+  /** Response headers, with lowercased names. */
+  headers?: Record<string, string>;
   /** Set when the body is not text and was not returned. */
   note?: string;
 }
@@ -114,7 +118,11 @@ const safeLookup: typeof dnsLookup = ((hostname: string, options: any, callback:
 const TEXT_TYPES = /^(text\/|application\/(json|xml|xhtml\+xml|rss\+xml|atom\+xml|javascript)|[^;]*\+(json|xml))/i;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
-function requestOnce(url: URL, opts: Required<Pick<GuardedFetchOptions, "maxBytes" | "allowPrivate">>, timeoutMs: number) {
+function requestOnce(
+  url: URL,
+  opts: Required<Pick<GuardedFetchOptions, "maxBytes" | "allowPrivate">> & { headers: Record<string, string> },
+  timeoutMs: number,
+) {
   return new Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer; truncated: boolean }>((resolve, reject) => {
     const client = url.protocol === "https:" ? https : http;
     const request = client.request(
@@ -122,6 +130,7 @@ function requestOnce(url: URL, opts: Required<Pick<GuardedFetchOptions, "maxByte
       {
         method: "GET",
         headers: {
+          ...opts.headers,
           "user-agent": "NEARFirewall-MCP/0.1",
           accept: "text/*, application/json, application/xml;q=0.9, */*;q=0.1",
           // Never ask for compressed data, so a small download cannot expand into a huge one.
@@ -164,6 +173,7 @@ export async function guardedFetch(rawUrl: string, options: GuardedFetchOptions 
   const deadline = Date.now() + (options.timeoutMs ?? 15_000);
 
   let url = new URL(rawUrl);
+  const origin = url.origin;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new FetchRefused("Only http and https links are allowed.");
     const verdict = options.check?.(url);
@@ -174,7 +184,8 @@ export async function guardedFetch(rawUrl: string, options: GuardedFetchOptions 
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error("The request timed out.");
-    const response = await requestOnce(url, { maxBytes, allowPrivate }, remaining);
+    const headers = url.origin === origin ? (options.headers ?? {}) : {};
+    const response = await requestOnce(url, { maxBytes, allowPrivate, headers }, remaining);
 
     const location = response.headers.location;
     if (REDIRECTS.has(response.status) && location) {
@@ -183,12 +194,17 @@ export async function guardedFetch(rawUrl: string, options: GuardedFetchOptions 
     }
     const contentType = String(response.headers["content-type"] ?? "");
     const isText = contentType === "" || TEXT_TYPES.test(contentType);
+    const responseHeaders: Record<string, string> = {};
+    for (const [name, value] of Object.entries(response.headers)) {
+      if (value !== undefined) responseHeaders[name.toLowerCase()] = Array.isArray(value) ? value.join(", ") : value;
+    }
     return {
       status: response.status,
       url: url.href,
       contentType,
       text: isText ? new TextDecoder("utf-8", { fatal: false }).decode(response.body) : "",
       truncated: response.truncated,
+      headers: responseHeaders,
       ...(isText ? {} : { note: `This is ${contentType || "binary"} content, so it was not returned.` }),
     };
   }

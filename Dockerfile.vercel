@@ -1,11 +1,4 @@
-# NEARFirewall gateway. Build from the repository root:
-#   docker build -f apps/gateway/Dockerfile -t nearfirewall-gateway .
-# Run (serve it over HTTPS: your host or a reverse proxy terminates TLS):
-#   docker run --rm -p 8787:8787 \
-#     -e NEARFIREWALL_ACCOUNT=you.testnet \
-#     -e NEARFIREWALL_AGENT_KEY=ed25519:... \
-#     -e GATEWAY_TOKEN=$(openssl rand -hex 32) \
-#     nearfirewall-gateway
+# Vercel builds this gateway image from the repository root.
 FROM node:24-slim
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=8787
 WORKDIR /app
@@ -15,6 +8,7 @@ COPY package.json package-lock.json ./
 COPY packages/sdk/package.json packages/sdk/
 COPY packages/mcp/package.json packages/mcp/
 COPY packages/templates/package.json packages/templates/
+COPY packages/x402/package.json packages/x402/
 COPY apps/gateway/package.json apps/gateway/
 COPY apps/runner/package.json apps/runner/
 COPY apps/web/package.json apps/web/
@@ -23,6 +17,7 @@ RUN npm ci --omit=dev --workspace @nearfirewall/gateway --include-workspace-root
 
 COPY packages/sdk/src packages/sdk/src
 COPY packages/mcp/src packages/mcp/src
+COPY packages/x402/src packages/x402/src
 COPY apps/gateway/src apps/gateway/src
 
 USER node

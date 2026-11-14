@@ -1,0 +1,12 @@
+{
+  "name": "@nearfirewall/x402",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "x402 payments in USDC on NEAR, within the owner's on-chain NEARFirewall rules: a buyer for agents and a paywall for sellers",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@nearfirewall/sdk": "0.1.0",
+    "near-api-js": "^7.5.3",
+    "zod": "^4.6.7"
+  }
+}

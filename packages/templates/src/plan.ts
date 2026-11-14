@@ -10,11 +10,15 @@ import {
   setAccountDailyCap,
   setMandate,
   setRecord,
+  setX402Config,
+  setX402Rules,
   approveRecipient,
+  type CapX402,
   type Capabilities,
   type RegistryClient,
   type RecipientRuleInput,
   type WalletTransaction,
+  type X402RulesInput,
 } from "@nearfirewall/sdk";
 
 export type PlanStep =
@@ -23,6 +27,8 @@ export type PlanStep =
       handle: string;
       executor: string | null;
       capabilities: Capabilities;
+      /** The largest x402 payment the agent may request. */
+      x402?: CapX402 | null;
       expiresAt?: bigint | null;
       locks?: number;
       description?: string | null;
@@ -33,10 +39,15 @@ export type PlanStep =
       label: string;
       executor: string | null;
       capabilities: Capabilities;
+      x402?: CapX402 | null;
       expiresAt?: bigint | null;
       locks?: number;
       description?: string | null;
     }
+  /** Turns x402 on for the payer, in `asset` (USDC). */
+  | { kind: "set_x402_config"; asset: string; accountDailyCap: bigint | null }
+  /** The agent's x402 limits. The agent needs a mandate first. */
+  | { kind: "set_x402_rules"; agentHandle: string; rules: X402RulesInput }
   | {
       kind: "set_mandate";
       agentHandle: string;
@@ -93,6 +104,10 @@ export function describeStep(step: PlanStep): string {
       return `Set ${step.key} on ${step.agentHandle}`;
     case "set_account_daily_cap":
       return step.cap === null ? "Remove the account-wide daily cap" : "Set the account-wide daily cap";
+    case "set_x402_config":
+      return "Turn on x402 payments in USDC";
+    case "set_x402_rules":
+      return `Set ${step.agentHandle}'s x402 limits (${step.rules.sellers.length} approved seller(s)${step.rules.unlisted ? ", a small budget for others" : ""})`;
   }
 }
 
@@ -126,5 +141,11 @@ export async function toTransaction(step: PlanStep, ctx: PlanContext, registry: 
     }
     case "set_account_daily_cap":
       return setAccountDailyCap(ctx.payer, step.cap);
+    case "set_x402_config":
+      return setX402Config(ctx.payer, step.asset, step.accountDailyCap);
+    case "set_x402_rules": {
+      const agent = await agentOrThrow(registry, step.agentHandle);
+      return setX402Rules(ctx.payer, agent.agent_id, step.rules);
+    }
   }
 }

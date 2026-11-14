@@ -16,12 +16,32 @@ import {
   RecordEntry,
   RegistryActivity,
   UsageView,
+  X402Config,
+  X402Rules,
+  X402UsageView,
 } from "./types.ts";
 import type { Action } from "./types.ts";
 import { toWireAction } from "./owner.ts";
 
 async function viewParsed<S extends z.ZodType>(rpc: NearRpc, contract: string, method: string, args: unknown, schema: S) {
   return schema.parse(await rpc.view(contract, method, args)) as z.infer<S>;
+}
+
+/** True when a view failed because the contract has no such method (older code). */
+function isMissingMethod(error: unknown): boolean {
+  const text = error instanceof Error ? `${error.message} ${JSON.stringify((error as { data?: unknown }).data ?? "")}` : String(error);
+  return /MethodNotFound|method.*not found/i.test(text);
+}
+
+/** A NEP-141 token balance, in the token's smallest unit. */
+export async function ftBalanceOf(rpc: NearRpc, token: string, accountId: string): Promise<bigint> {
+  const value = await rpc.view(token, "ft_balance_of", { account_id: accountId });
+  return BigInt(z.string().regex(/^\d+$/).parse(value));
+}
+
+/** True when `accountId` is registered with a NEP-145 token, so it can receive it. */
+export async function isTokenRegistered(rpc: NearRpc, token: string, accountId: string): Promise<boolean> {
+  return (await rpc.view(token, "storage_balance_of", { account_id: accountId })) !== null;
 }
 
 /** Read-only client for the registry. */
@@ -157,6 +177,39 @@ export class PolicyClient {
 
   getUsage(agentId: string, recipient?: string) {
     return viewParsed(this.rpc, this.payerId, "get_usage", { agent_id: agentId, recipient: recipient ?? null }, UsageView);
+  }
+
+  /** Whether the deployed policy supports x402 at all, and its settings when it is on. */
+  async x402Status(): Promise<{ supported: boolean; config: X402Config | null }> {
+    try {
+      return { supported: true, config: await viewParsed(this.rpc, this.payerId, "get_x402_config", {}, X402Config.nullable()) };
+    } catch (error) {
+      if (isMissingMethod(error)) return { supported: false, config: null };
+      throw error;
+    }
+  }
+
+  /** x402 settings, or null when x402 is off (or the policy predates x402). */
+  async getX402Config() {
+    try {
+      return await viewParsed(this.rpc, this.payerId, "get_x402_config", {}, X402Config.nullable());
+    } catch (error) {
+      if (isMissingMethod(error)) return null;
+      throw error;
+    }
+  }
+
+  async getX402Rules(agentId: string) {
+    try {
+      return await viewParsed(this.rpc, this.payerId, "get_x402_rules", { agent_id: agentId }, X402Rules.nullable());
+    } catch (error) {
+      if (isMissingMethod(error)) return null;
+      throw error;
+    }
+  }
+
+  getX402Usage(agentId: string, seller?: string) {
+    return viewParsed(this.rpc, this.payerId, "get_x402_usage", { agent_id: agentId, seller: seller ?? null }, X402UsageView);
   }
 
   getRequest(leaf: string, requestId: string) {

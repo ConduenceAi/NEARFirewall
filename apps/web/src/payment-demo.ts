@@ -36,12 +36,12 @@ export function parseDemoRequest(message: string, approved: string = RECIPIENTS.
   return amount > 0n ? { recipient: noa ? "noa" : "dragons", amount } : null;
 }
 
-export function evaluateDemoPayment(request: PaymentRequest, spent: bigint, reserved: bigint, approved: string = RECIPIENTS.noa, unapproved: string = RECIPIENTS.dragons): Pick<DemoPayment, "status" | "detail" | "previewBlocked"> {
+export function evaluateDemoPayment(request: PaymentRequest, spent: bigint, reserved: bigint, approved: string = RECIPIENTS.noa, unapproved: string = RECIPIENTS.dragons, allowOneTimeApproval = false): Pick<DemoPayment, "status" | "detail" | "previewBlocked"> {
   const { amount, recipient } = request;
   if (amount > AGENT_PAYMENT_CAP) {
     return { status: "blocked", detail: `The registry blocked this request because it exceeds the agent’s ${near(AGENT_PAYMENT_CAP)} ceiling.`, previewBlocked: false };
   }
-  if (recipient !== "noa") {
+  if (recipient !== "noa" && !allowOneTimeApproval) {
     return { status: "blocked", detail: unapproved + " is outside your approved recipient list. I stopped at the policy check.", previewBlocked: true };
   }
   if (amount > RECIPIENT_PAYMENT_CAP) {
@@ -50,6 +50,9 @@ export function evaluateDemoPayment(request: PaymentRequest, spent: bigint, rese
   const available = RECIPIENT_DAILY_CAP - spent - reserved;
   if (amount > available) {
     return { status: "blocked", detail: `${approved} has ${near(available)} left in today’s budget. I stopped at the policy check.`, previewBlocked: true };
+  }
+  if (recipient !== "noa") {
+    return { status: "pending", detail: `${unapproved} is unregistered. The wallet owner can approve this ${near(amount)} payment once or decline it.`, previewBlocked: true };
   }
   if (amount > CONFIRM_ABOVE) {
     return { status: "pending", detail: `This fits your limits. I reserved ${near(amount)} and sent the request to your approval queue.`, previewBlocked: false };

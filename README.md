@@ -69,7 +69,38 @@ Copy these two build outputs into `apps/web/public/` before starting the dashboa
 | Choose **Connect** on the agent, sign the restricted-key transaction, and load the displayed MCP configuration in a local client. | `get_rules` returns the agent's current limits. |
 | Request 2 NEAR and then 4.5 NEAR for the approved recipient. | The first payment settles. The second appears in the dashboard's **Ask me first** queue, where the owner can confirm or decline it. |
 
-For a signed Testnet walkthrough, the [Testnet runbook](docs/testnet-runbook.md#fresh-owner-registry-and-local-mcp) includes the CLI route used to verify local MCP over stdio. The runbook records dashboard testing with a mock wallet. The published receipts above cover native NEAR transfers. The x402 implementation is exercised separately in [local tests](packages/x402/test/x402.test.ts).
+For a signed Testnet walkthrough, the [Testnet runbook](docs/testnet-runbook.md#fresh-owner-registry-and-local-mcp) includes the CLI route used to verify local MCP over stdio. The runbook records dashboard testing with a mock wallet.
+
+### x402 API payments
+
+An agent can use `fetch_paid` over MCP or `POST /api/x402/fetch` on the gateway to buy an API response in USDC on NEAR.
+
+1. The API returns HTTP `402 Payment Required` with its price and payment terms.
+2. The buyer requests funding from the owner's on-chain policy. The policy checks seller rules, per-payment and daily caps, and the applicable branch and account budgets. When approved, it funds the connection's payment account with the exact amount.
+3. The buyer signs the USDC transfer and retries the request. The included seller paywall releases the response after its facilitator verifies and settles the payment. The `return_unspent_usdc` MCP tool sends leftover funds back to the owner.
+
+Before the first purchase, the owner sets these rules on-chain, under **Payments → x402 payments (USDC)** or with the **x402 buyer** template:
+
+- Turn x402 on for the account, in USDC, with an optional account-wide daily cap.
+- Give the agent an x402 cap per payment, at registration or later. The cap lives on the agent NFT, and child agents can only narrow it.
+- Set a daily x402 budget, any approved sellers with their own limits, and a small shared budget for sellers that are not listed (default 0.05 USDC each and 0.25 USDC a day for all of them together).
+- Set up each connection's payment account. This sends 0.01 NEAR and registers the account with USDC.
+
+x402 needs contracts built from this revision. Registries deployed earlier have no access keys, so they cannot be upgraded. Use a fresh Testnet account.
+
+| Do this | See this |
+| --- | --- |
+| `npm test -- packages/x402/test/x402.test.ts` | Local buyer and paywall tests with mocked NEAR and facilitator responses. They cover successful purchase, free responses, price limits, policy refusal, and seller settlement. |
+
+The linked Testnet receipts document native NEAR payments. x402 verification here uses the local tests.
+
+### Deploy the dashboard and gateway to Vercel
+
+Import the repository with the project Root Directory set to `./` so Vercel reads [`vercel.json`](vercel.json). The dashboard serves `/`, and the gateway serves `/api`, `/mcp`, and `/health` on the same domain. Use the deployment origin as the gateway address in the dashboard's Connect panel.
+
+In Vercel's Environment Variables, set `NEARFIREWALL_ACCOUNT`, `NEARFIREWALL_AGENT_KEY` (the restricted connection key), `GATEWAY_TOKEN` (at least 32 characters), and `PORT=8787`. The gateway serves a single connection. Set `NEARFIREWALL_NETWORK` if the connection uses mainnet. To verify routing, run `vercel dev --local` from the repository root with Docker running and those gateway settings in your environment, then open `/` and `/health` on the local URL.
+
+To support creating registries and enabling payments on fresh accounts, also configure the contract WASM URLs or the corresponding global code hashes from [`apps/web/.env.example`](apps/web/.env.example). The browser demo runs without those contract files.
 
 ## How it works
 
@@ -124,4 +155,4 @@ cargo test --workspace
 
 ### License
 
-Project license pending.
+NEARFirewall is released under the [MIT License](LICENSE). See the [third-party Edge notice](third-party/Edge-LICENSE) for its BSD 3-Clause terms.

@@ -8,6 +8,7 @@
     "@modelcontextprotocol/sdk": "^1.32.2",
     "@nearfirewall/mcp": "0.1.0",
     "@nearfirewall/sdk": "0.1.0",
+    "@nearfirewall/x402": "0.1.0",
     "near-api-js": "^7.5.3",
     "zod": "^4.6.7"
   }

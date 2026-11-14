@@ -1,6 +1,10 @@
-import { formatNear, type AgentView, type Capabilities } from "@nearfirewall/sdk";
+import { formatNear, formatUsdc, isX402, type AgentView, type Capabilities, type Via } from "@nearfirewall/sdk";
 
 export const near = (yocto: bigint) => `${formatNear(yocto)} NEAR`;
+
+/** An activity amount: USDC for x402 payments, NEAR otherwise. */
+export const amountText = (entry: { amount: bigint; via?: Via | null }) =>
+  isX402(entry.via) ? `${formatUsdc(entry.amount)} USDC (x402)` : near(entry.amount);
 
 export function capText(caps: Capabilities): string {
   return caps.transfer_near ? `up to ${near(caps.transfer_near.max_per_payment)} per payment` : "no payments";

@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ArrowRight, ArrowUp, Check, ChevronRight, CircleSlash, Clock3, Gauge, KeyRound, Link2, RotateCcw, ShieldCheck, Wallet } from "lucide-react";
+import { ArrowRight, ArrowUp, ChevronRight, Gauge, KeyRound, Link2, RotateCcw, ShieldCheck, Wallet } from "lucide-react";
 import { near } from "../format.ts";
 import { AGENT_PAYMENT_CAP, CONFIRM_ABOVE, evaluateDemoPayment, INITIAL_SPEND, parseDemoRequest, RECIPIENT_DAILY_CAP, RECIPIENT_PAYMENT_CAP, type DemoPayment } from "../payment-demo.ts";
 import { href } from "../router.ts";
 
 const SCENARIOS = [
-  { label: "Trading · Fund a strategy wallet", detail: "Create a child agent and request 3 NEAR for its trading wallet", prompt: "Send 3 NEAR to Strategy Wallet to fund the trading account.", vendor: "Strategy Wallet", alternate: "Unknown Wallet", app: "Trading desk", logo: null, config: null, agent: "market-maker", parent: "treasury", icon: Wallet },
-  { label: "HR · Background checks", detail: "Pay 2 NEAR for a new hire’s screening", prompt: "Pay ClearCheck 2 NEAR for the new hire’s background check.", vendor: "ClearCheck", alternate: "QuickScreen", app: "Claude Desktop", logo: "claude.svg", config: "claude_desktop_config.json", agent: "people-ops", icon: Check },
-  { label: "Engineering · CI renewal", detail: "Review a 3 NEAR build service invoice", prompt: "Pay BuildCloud 3 NEAR to renew our CI build credits.", vendor: "BuildCloud", alternate: "FastBuild", app: "Cursor", logo: "cursor.svg", config: "~/.cursor/mcp.json", agent: "dev-ops", icon: Clock3 },
-  { label: "Operations · Shipping labels", detail: "A 4 NEAR invoice exceeds the per-payment limit", prompt: "Pay ParcelDesk 4 NEAR for this week’s shipping labels.", vendor: "ParcelDesk", alternate: "QuickShip", app: "Custom runner", logo: null, config: null, agent: "fulfillment", icon: Gauge },
-  { label: "Finance · New software vendor", detail: "Block a 2 NEAR invoice from an unapproved vendor", prompt: "Pay LedgerTrial 2 NEAR for a trial subscription.", vendor: "LedgerDesk", alternate: "LedgerTrial", app: "Claude Code", logo: "claude-code.svg", config: "Local MCP configuration", agent: "accounts-payable", icon: CircleSlash },
+  { label: "Trading · Fund a strategy wallet", detail: "Request 3 NEAR for an unregistered market data vendor", prompt: "Pay Market Signals 3 NEAR for the trading desk’s data feed.", vendor: "Strategy Wallet", alternate: "Market Signals", app: "Trading desk", logo: null, config: null, agent: "market-maker", parent: "treasury", avatar: "📈", tone: "trading" },
+  { label: "HR · Background checks", detail: "Pay 2 NEAR for a new hire’s screening", prompt: "Pay ClearCheck 2 NEAR for the new hire’s background check.", vendor: "ClearCheck", alternate: "QuickScreen", app: "Claude Desktop", logo: "claude.svg", config: "claude_desktop_config.json", agent: "people-ops", avatar: "🪪", tone: "hr" },
+  { label: "Engineering · CI renewal", detail: "Review a 3 NEAR build service invoice", prompt: "Pay BuildCloud 3 NEAR to renew our CI build credits.", vendor: "BuildCloud", alternate: "FastBuild", app: "Cursor", logo: "cursor.svg", config: "~/.cursor/mcp.json", agent: "dev-ops", avatar: "💻", tone: "engineering" },
+  { label: "Operations · Shipping labels", detail: "A 4 NEAR invoice exceeds the per-payment limit", prompt: "Pay ParcelDesk 4 NEAR for this week’s shipping labels.", vendor: "ParcelDesk", alternate: "QuickShip", app: "Custom runner", logo: null, config: null, agent: "fulfillment", avatar: "📦", tone: "operations" },
 ] as const;
 
 const STATUS = { settled: "Settled", blocked: "Blocked", pending: "Needs approval", declined: "Declined" };
@@ -45,7 +44,7 @@ export function PaymentDemo() {
     }
     const decision = parent && parentPaused
       ? { status: "blocked" as const, detail: "The treasury parent is paused, so its child cannot request payments.", previewBlocked: true }
-      : evaluateDemoPayment(request, spent, reserved, scenario.vendor, scenario.alternate);
+      : evaluateDemoPayment(request, spent, reserved, scenario.vendor, scenario.alternate, Boolean(parent));
     setPayments([...payments, { ...request, ...decision, id: payments.length + 1, prompt: prompt.trim() }]);
     setPrompt("");
     setError("");
@@ -55,7 +54,7 @@ export function PaymentDemo() {
     setPayments((current) => current.map((item) => item.id !== payment.id || item.status !== "pending" ? item : {
       ...item,
       status: approve ? "settled" : "declined",
-      detail: approve ? `You approved ${near(item.amount)} to ${name(item.recipient)}. The payment settled.` : "You declined the request. I released its budget reservation.",
+      detail: approve ? `You approved ${near(item.amount)} to ${name(item.recipient)}. The payment settled.` : "The payment failed because you declined the request. I released its budget reservation.",
     }));
   }
 
@@ -72,7 +71,7 @@ export function PaymentDemo() {
   const ownerActions = (payment: DemoPayment) => (
     <div className="demo-approval" role="group" aria-label={`Review request ${payment.id}`}>
       <button type="button" onClick={() => resolve(payment, false)}>Decline</button>
-      <button type="button" className="primary" onClick={() => resolve(payment, true)}>Approve payment</button>
+      <button type="button" className="primary" disabled={parentPaused} onClick={() => resolve(payment, true)}>{payment.recipient === "dragons" ? "Approve once" : "Approve payment"}</button>
     </div>
   );
 
@@ -83,10 +82,10 @@ export function PaymentDemo() {
         <p className="lead">Choose a trading or workplace scenario and see what happens when its agent requests a payment.</p>
         <div className="payment-scenarios" role="group" aria-label="Sample invoices">
           {SCENARIOS.map((option) => {
-            const { label, detail, icon: Icon } = option;
+            const { label, detail, avatar, tone } = option;
             return (
             <button key={label} type="button" aria-pressed={scenario === option} onClick={() => { if (scenario !== option) reset(); setScenario(option); setPrompt(option.prompt); setView("chat"); }}>
-              <span className="scenario-icon"><Icon size={19} aria-hidden="true" /></span>
+              <span className="scenario-icon" data-tone={tone} aria-hidden="true">{avatar}</span>
               <span><strong>{label}</strong><small>{detail}</small></span>
               <ChevronRight size={17} aria-hidden="true" />
             </button>
@@ -118,7 +117,7 @@ export function PaymentDemo() {
         {parent && !childCreated ? (
           <div className="demo-connect">
             <h4>Create a trading agent under treasury</h4>
-            <p>Treasury sets the branch ceiling. The child can request transfers to the approved strategy wallet, with owner approval above {near(CONFIRM_ABOVE)}.</p>
+            <p>Treasury sets the branch ceiling. The child can request transfers within its limits, with owner approval for unregistered vendors and payments above {near(CONFIRM_ABOVE)}.</p>
             <button type="button" className="primary" onClick={() => setChildCreated(true)}>Create child agent <ArrowRight size={16} aria-hidden="true" /></button>
             <small>Demo funds a strategy wallet with simulated NEAR.</small>
           </div>
@@ -142,7 +141,7 @@ export function PaymentDemo() {
           </div>
         ) : (
           <>
-            <div className="demo-wallet-strip"><ShieldCheck size={17} aria-hidden="true" /><span>{scenario.vendor} budget <strong>{near(RECIPIENT_DAILY_CAP - spent - reserved)} left</strong></span>{reserved > 0n && <small>{near(reserved)} reserved</small>}</div>
+            <div className="demo-wallet-strip"><ShieldCheck size={17} aria-hidden="true" /><span>{parent ? "Trading desk" : scenario.vendor} budget <strong>{near(RECIPIENT_DAILY_CAP - spent - reserved)} left</strong></span>{reserved > 0n && <small>{near(reserved)} reserved</small>}</div>
             <div className="demo-views" role="group" aria-label="Demo view">
               <button type="button" aria-pressed={view === "chat"} onClick={() => setView("chat")}>Chat</button>
               <button type="button" aria-pressed={view === "activity"} onClick={() => setView("activity")}>Activity {payments.length > 0 && <span>{payments.length}</span>}</button>
@@ -152,7 +151,7 @@ export function PaymentDemo() {
                 <div className="demo-conversation" ref={conversation} role="log" aria-label="Demo agent conversation">
                   <div className="demo-reply">
                     <div className="demo-tool"><code>get_rules</code><span>Rules loaded</span></div>
-                    <p>I can pay {scenario.vendor} up to {near(RECIPIENT_PAYMENT_CAP)} per invoice and {near(RECIPIENT_DAILY_CAP)} per day. I’ll ask you first above {near(CONFIRM_ABOVE)}. Which invoice should I pay?</p>
+                    <p>I can pay {scenario.vendor} up to {near(RECIPIENT_PAYMENT_CAP)} per invoice and {near(RECIPIENT_DAILY_CAP)} per day. I’ll ask you first above {near(CONFIRM_ABOVE)}. {parent && " An unregistered vendor needs your permission for each payment."} Which invoice should I pay?</p>
                   </div>
                   {payments.map((payment) => <div className="demo-exchange" key={payment.id}>
                     <p className="demo-bubble">{payment.prompt}</p>

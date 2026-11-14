@@ -5,6 +5,8 @@ import {
   burnLocks,
   createChild,
   parseNear,
+  formatUsdc,
+  parseUsdc,
   pauseAgent,
   registerAgent,
   removeAgent,
@@ -13,6 +15,7 @@ import {
   setRecord,
   transferAgent,
   transferCapability,
+  x402Capability,
   type AgentView,
 } from "@nearfirewall/sdk";
 import { config, explorerAccount, rpc } from "../config.ts";
@@ -94,6 +97,8 @@ function AgentCard({
         </dd>
         <dt>Can request</dt>
         <dd>{capText(agent.capabilities)}</dd>
+        <dt>x402 (USDC)</dt>
+        <dd>{agent.x402 ? `up to ${formatUsdc(agent.x402.max_per_payment)} USDC per payment` : "not allowed"}</dd>
         <dt>Expires</dt>
         <dd>{timeText(agent.expires_at)}</dd>
         <dt>Generation</dt>
@@ -399,6 +404,7 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
   const [handle, setHandle] = useState("");
   const executor = useExecutorAccount(accountId);
   const [max, setMax] = useState("3");
+  const [maxX402, setMaxX402] = useState("");
   const [date, setDate] = useState("");
   const [hour, setHour] = useState("00");
   const [minute, setMinute] = useState("00");
@@ -425,12 +431,15 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
     try {
       const amount = parseNear(max);
       if (amount >= (1n << 128n)) throw new Error("Enter a smaller maximum per payment.");
+      const x402Amount = maxX402.trim() ? parseUsdc(maxX402) : null;
+      if (x402Amount === 0n) throw new Error("Leave the x402 maximum blank to refuse x402, or enter an amount above zero.");
       if (new TextEncoder().encode(description).length > 512) throw new Error("Keep the description within 512 bytes.");
       if (!await executor.verify()) return;
       const expires = localExpiry(date, hour, minute);
       await onSubmit(registerAgent(registry.registryId, handle.trim(), {
         executor: executor.value.trim() || null,
         capabilities: transferCapability(amount),
+        x402: x402Amount === null ? null : x402Capability(x402Amount),
         expiresAt: expires ? BigInt(expires.getTime()) * 1_000_000n : null,
         locks: (noTransfer ? LOCKS.NO_TRANSFER : 0) | (freeze ? LOCKS.NO_CAPABILITY_RAISE : 0),
         description: description || null,
@@ -455,6 +464,10 @@ function RegisterForm({ busy, onSubmit }: { busy: boolean; onSubmit: (tx: Return
         <div className="agent-field">
           <FieldLabel id={`${id}-max`} label="Max per payment (NEAR)" help="The most this agent can request in a single payment. Recipient limits can lower this amount. Set it to 0 to block payments." />
           <input id={`${id}-max`} value={max} onChange={(e) => setMax(e.target.value)} inputMode="decimal" pattern={nearPattern} required />
+        </div>
+        <div className="agent-field">
+          <FieldLabel id={`${id}-x402`} label="Max per x402 payment (USDC, optional)" help="The most this agent can pay an x402 seller in one payment, in USDC. Leave blank to refuse x402. Set the sellers and daily budgets under Payments." />
+          <input id={`${id}-x402`} value={maxX402} onChange={(e) => setMaxX402(e.target.value)} inputMode="decimal" pattern="\d+(\.\d{1,6})?" placeholder="0.5" />
         </div>
         <div className="agent-field" role="group" aria-labelledby={`${id}-expiry`} aria-describedby={`${id}-expiry-status`}>
           <FieldLabel titleId={`${id}-expiry`} label="Expiry (optional)" help="When the registry stops accepting requests from this agent and its descendants. Leave the date blank for no expiry. The time is based on your device's time zone." />

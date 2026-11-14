@@ -30,12 +30,12 @@ use near_contract_standards::non_fungible_token::{NonFungibleToken, Token, Token
 use near_sdk::json_types::{U128, U64};
 use near_sdk::store::LookupMap;
 use near_sdk::{
-    assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas, NearToken,
-    PanicOnDefault, Promise, PromiseOrValue,
+    assert_one_yocto, env, ext_contract, near, require, AccountId, BorshStorageKey, Gas,
+    IntoStorageKey, NearToken, PanicOnDefault, Promise, PromiseOrValue,
 };
 use nearfirewall_types::{
-    is_valid_request_id, Action, AgentId, Authorization, Capabilities, ExecContext, Outcome,
-    PathNode, Reason, MAX_DEPTH,
+    is_valid_request_id, Action, AgentId, Authorization, CapX402, Capabilities, ExecContext,
+    Outcome, PathNode, Reason, MAX_DEPTH,
 };
 
 /// The token cannot be transferred or approved for transfer.
@@ -53,8 +53,9 @@ pub const MAX_NAMESPACE_BYTES: usize = 32;
 pub const MAX_DESCRIPTION_BYTES: usize = 512;
 /// Registry-side outcomes kept per agent.
 pub const ACTIVITY_SIZE: u64 = 32;
-/// Storage reserved at registration for the activity ring buffer.
-pub const ACTIVITY_RESERVE_BYTES: u64 = ACTIVITY_SIZE * 220;
+/// Storage reserved at registration for the activity ring buffer. An x402
+/// entry names the token and the seller, so a slot can need about 320 bytes.
+pub const ACTIVITY_RESERVE_BYTES: u64 = ACTIVITY_SIZE * 320;
 const GAS_FOR_POLICY: Gas = Gas::from_tgas(40);
 
 #[derive(BorshStorageKey)]
@@ -70,6 +71,34 @@ enum StorageKey {
     RecordKeys,
     Records,
     Activity,
+    /// Each agent's x402 capability, outside `AgentRecord` so existing records
+    /// keep their layout. Appended: never reorder.
+    X402Caps,
+}
+
+fn x402_cap_key(agent_id: &str) -> Vec<u8> {
+    let mut key = StorageKey::X402Caps.into_storage_key();
+    key.extend_from_slice(agent_id.as_bytes());
+    key
+}
+
+fn read_x402_cap(agent_id: &str) -> Option<CapX402> {
+    env::storage_read(&x402_cap_key(agent_id)).map(|bytes| {
+        near_sdk::borsh::from_slice(&bytes)
+            .unwrap_or_else(|_| env::panic_str("Stored x402 capability is unreadable"))
+    })
+}
+
+fn write_x402_cap(agent_id: &str, cap: Option<&CapX402>) {
+    let key = x402_cap_key(agent_id);
+    match cap {
+        Some(cap) => {
+            env::storage_write(&key, &near_sdk::borsh::to_vec(cap).unwrap());
+        }
+        None => {
+            env::storage_remove(&key);
+        }
+    }
 }
 
 #[near(serializers = [borsh, json])]
@@ -115,6 +144,8 @@ pub struct AgentView {
     pub depth: u8,
     pub executor: Option<AccountId>,
     pub capabilities: Capabilities,
+    /// The largest x402 payment this agent may request. `None` refuses x402.
+    pub x402: Option<CapX402>,
     pub status: Status,
     pub expires_at: Option<U64>,
     pub locks: u32,
@@ -317,6 +348,7 @@ impl Registry {
     // ------------------------------------------------------------ agents and tree
 
     /// Registers a top-level agent and mints its token to the owner. Owner only.
+    /// `x402` is the largest x402 payment it may request; leave it out to refuse x402.
     #[payable]
     pub fn register_agent(
         &mut self,
@@ -326,6 +358,7 @@ impl Registry {
         expires_at: Option<u64>,
         locks: Option<u32>,
         description: Option<String>,
+        x402: Option<CapX402>,
     ) -> AgentView {
         let initial = env::storage_usage();
         validate_label(&handle);
@@ -341,6 +374,7 @@ impl Registry {
             vec![],
             executor,
             capabilities,
+            x402,
             expires_at,
             locks,
             description,
@@ -361,6 +395,7 @@ impl Registry {
         expires_at: Option<u64>,
         locks: Option<u32>,
         description: Option<String>,
+        x402: Option<CapX402>,
     ) -> AgentView {
         let initial = env::storage_usage();
         validate_label(&label);
@@ -376,6 +411,10 @@ impl Registry {
         );
         require!(
             capabilities.is_within(&parent.capabilities),
+            "A child cannot be wider than its parent"
+        );
+        require!(
+            CapX402::is_within(x402.as_ref(), read_x402_cap(&parent_id).as_ref()),
             "A child cannot be wider than its parent"
         );
         require!(
@@ -398,6 +437,7 @@ impl Registry {
             ancestors,
             executor,
             capabilities,
+            x402,
             expires_at,
             locks,
             description,
@@ -483,6 +523,31 @@ impl Registry {
             );
         }
         self.agent_mut(&agent_id).capabilities = capabilities;
+        RegistryEvent::CapabilitiesSet { agent_id }.emit();
+    }
+
+    /// Sets the largest x402 payment the agent may request, or `None` to refuse
+    /// x402. Same rules as `set_capabilities`: it must fit inside the parent's,
+    /// and only narrow once `NO_CAPABILITY_RAISE` is burned.
+    #[payable]
+    pub fn set_x402_capability(&mut self, agent_id: AgentId, x402: Option<CapX402>) {
+        assert_one_yocto();
+        let record = self.agent(&agent_id).clone();
+        self.require_authority(&agent_id, &record);
+        self.require_not_removed(&record);
+        if let Some(parent_id) = &record.parent {
+            require!(
+                CapX402::is_within(x402.as_ref(), read_x402_cap(parent_id).as_ref()),
+                "A child cannot be wider than its parent"
+            );
+        }
+        if record.locks & LOCK_NO_CAPABILITY_RAISE != 0 {
+            require!(
+                CapX402::is_within(x402.as_ref(), read_x402_cap(&agent_id).as_ref()),
+                "This agent's capabilities can only narrow"
+            );
+        }
+        write_x402_cap(&agent_id, x402.as_ref());
         RegistryEvent::CapabilitiesSet { agent_id }.emit();
     }
 
@@ -913,6 +978,7 @@ impl Registry {
         ancestors: Vec<AgentId>,
         executor: Option<AccountId>,
         capabilities: Capabilities,
+        x402: Option<CapX402>,
         expires_at: Option<u64>,
         locks: Option<u32>,
         description: Option<String>,
@@ -973,6 +1039,7 @@ impl Registry {
                 activity_next: 0,
             },
         );
+        write_x402_cap(&id, x402.as_ref());
         RegistryEvent::AgentRegistered {
             agent_id: id.clone(),
             handle,
@@ -1059,7 +1126,13 @@ impl Registry {
                     Reason::BranchExpired
                 }));
             }
-            if let Err(reason) = node.capabilities.allows(action) {
+            let allowed = match action {
+                Action::X402Pay { amount, .. } => {
+                    CapX402::allows(read_x402_cap(id).as_ref(), amount.0)
+                }
+                _ => node.capabilities.allows(action),
+            };
+            if let Err(reason) = allowed {
                 return Err(if is_leaf {
                     Outcome::denied(reason)
                 } else {
@@ -1115,6 +1188,7 @@ impl Registry {
             depth: r.ancestors.len() as u8,
             executor: r.executor.clone(),
             capabilities: r.capabilities.clone(),
+            x402: read_x402_cap(agent_id),
             status: r.status,
             expires_at: r.expires_at.map(U64),
             locks: r.locks,

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { describeReason } from "@nearfirewall/sdk";
+import { describeReason, formatUsdc, isX402 } from "@nearfirewall/sdk";
 import { policyOf } from "../config.ts";
 import { useWorkspaceRegistry } from "../workspace-registry.tsx";
 import { near, timeText } from "../format.ts";
@@ -15,6 +15,8 @@ interface Entry {
   agent: string;
   recipient: string;
   amount: bigint;
+  /** An x402 payment: the amount is USDC and the recipient is the seller. */
+  x402?: boolean;
   kind: Kind;
   detail: string;
   connection?: string;
@@ -68,18 +70,21 @@ export function ActivityPanel() {
       agent: handles.get(p.leaf) ?? `#${p.leaf}`,
       recipient: p.recipient,
       amount: p.amount,
+      x402: isX402(p.via),
       ...POLICY_OUTCOMES[p.outcome],
       detail: p.outcome === "denied" && p.reason ? describeReason(p.reason) : POLICY_OUTCOMES[p.outcome].detail,
-      connection: p.via?.kind === "connection" ? [p.via.label, p.client].filter(Boolean).join(" · ") : undefined,
+      connection: p.via && p.via.kind !== "executor" ? [p.via.label, p.client].filter(Boolean).join(" · ") : undefined,
     }));
     for (const e of routed.flat()) {
       if (e.outcome !== "denied") continue;
+      const x402 = e.action.type === "X402Pay";
       entries.push({
         key: `r-${e.agent}-${e.seq}`,
         at: e.at,
         agent: e.agent,
-        recipient: e.action.recipient,
+        recipient: e.action.type === "X402Pay" ? e.action.pay_to : e.action.recipient,
         amount: e.action.amount,
+        x402,
         kind: "registry",
         detail: e.reason ? describeReason(e.reason) : "Blocked before reaching your account",
       });
@@ -136,7 +141,7 @@ export function ActivityPanel() {
               <span className="title">
                 {e.agent} → {e.recipient}
               </span>
-              <span className="amount">{near(e.amount)}</span>
+              <span className="amount">{e.x402 ? `${formatUsdc(e.amount)} USDC (x402)` : near(e.amount)}</span>
               <span className="sub">{e.kind === "registry" ? `Blocked by the registry: ${e.detail}` : e.detail}{e.connection && ` · ${e.connection}`}</span>
               <span className="when">{timeText(e.at)}</span>
             </li>

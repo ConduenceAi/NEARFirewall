@@ -13,6 +13,7 @@ import {
   LOCKS,
   describeReason,
   disconnectAgentKey,
+  formatUsdc,
   pauseAgent,
   pausePayments,
   removeRecipient,
@@ -26,7 +27,7 @@ import {
 } from "@nearfirewall/sdk";
 import { explorerAccount, explorerContract, explorerNft, policyOf, rpc } from "../config.ts";
 import { useWorkspaceRegistry } from "../workspace-registry.tsx";
-import { capText, ensureOk, near, statusText, timeText } from "../format.ts";
+import { amountText, capText, ensureOk, near, statusText, timeText } from "../format.ts";
 import { useAction, useAsync } from "../hooks.ts";
 import { href } from "../router.ts";
 import { platforms } from "../platforms.ts";
@@ -202,7 +203,7 @@ function ConnectionDetails({ connection, data, onChanged }: { connection: Connec
     <Section title="Recent activity">
       {activity.error && <p className="notice error">{activity.error}</p>}
       {activity.data?.length ? <ul className="insp-list">{activity.data.map((a) => (
-        <li key={a.seq.toString()}>{near(a.amount)} → <AccountLink account={a.recipient} /> · {a.outcome === "awaiting" ? "waiting for confirmation" : a.outcome}{a.reason ? ` · ${describeReason(a.reason)}` : ""}</li>
+        <li key={a.seq.toString()}>{amountText(a)} → <AccountLink account={a.recipient} /> · {a.outcome === "awaiting" ? "waiting for confirmation" : a.outcome}{a.reason ? ` · ${describeReason(a.reason)}` : ""}</li>
       ))}</ul> : <p className="hint">{activity.loading ? "Loading…" : "No recent requests from this key."}</p>}
     </Section>
     <div className="insp-actions"><button type="button" className="danger" disabled={action.busy} onClick={() => void disconnect()}>Disconnect key</button></div>
@@ -554,12 +555,12 @@ function AgentDetails({ agent, data, busy, exec, onConnect }: { agent: AgentView
           <ul className="insp-list">
             {d.payments.map((a) => (
               <li key={`p${a.seq}`} className={a.outcome === "settled" ? "" : "deny"}>
-                {near(a.amount)} → <AccountLink account={a.recipient} /> · {a.outcome === "settled" ? "paid" : a.reason ? describeReason(a.reason) : a.outcome}
+                {amountText(a)} → <AccountLink account={a.recipient} /> · {a.outcome === "settled" ? "paid" : a.reason ? describeReason(a.reason) : a.outcome}
               </li>
             ))}
             {d.registryDenials.slice(0, 4).map((a) => (
               <li key={`r${a.seq}`} className="deny">
-                {near(a.action.amount)} → <AccountLink account={a.action.recipient} /> · {a.reason ? describeReason(a.reason) : "blocked"}
+                {a.action.type === "X402Pay" ? `${formatUsdc(a.action.amount)} USDC (x402)` : near(a.action.amount)} → <AccountLink account={a.action.type === "X402Pay" ? a.action.pay_to : a.action.recipient} /> · {a.reason ? describeReason(a.reason) : "blocked"}
               </li>
             ))}
           </ul>

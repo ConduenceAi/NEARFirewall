@@ -91,6 +91,7 @@ docker run -d --restart unless-stopped -p 8787:8787 --env-file nearfirewall-gate
 
       <h3>2. Serve it over HTTPS</h3>
       <p>The token travels with every request, so put the gateway behind HTTPS (your host's TLS, a reverse proxy, or a tunnel) and enter its public address here.</p>
+      <p className="hint">If the dashboard and gateway share a Vercel project, enter this site's origin as the gateway address.</p>
       <label>
         Gateway address
         <input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="https://nearfirewall.example.com" inputMode="url" spellCheck={false} />

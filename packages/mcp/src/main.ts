@@ -8,12 +8,17 @@
  *   NEARFIREWALL_NETWORK    testnet (default) or mainnet
  *   NEARFIREWALL_RPC_URL    optional RPC endpoint
  *   NEARFIREWALL_MAX_PAYMENT optional local ceiling per payment, in NEAR
+ *   NEARFIREWALL_MAX_X402    optional local ceiling per x402 payment, in USDC
+ *
+ * x402 payments use the same key: it also controls the key's x402 payment
+ * account, which the owner's policy funds one payment at a time.
  *
  * Diagnostics go to stderr; stdout carries only MCP messages. The key is never printed.
  */
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Account, KeyPair, type KeyPairString } from "near-api-js";
-import { AgentConnection, NearRpc, parseNear } from "@nearfirewall/sdk";
+import { AgentConnection, NearRpc, parseNear, parseUsdc } from "@nearfirewall/sdk";
+import { X402Buyer } from "@nearfirewall/x402";
 import { createServer } from "./server.ts";
 
 function fail(message: string): never {
@@ -28,12 +33,14 @@ if (!/^ed25519:[1-9A-HJ-NP-Za-km-z]+$/.test(secret)) fail("NEARFIREWALL_AGENT_KE
 const network = env.NEARFIREWALL_NETWORK === "mainnet" ? "mainnet" : "testnet";
 const rpcUrl = env.NEARFIREWALL_RPC_URL ?? (network === "mainnet" ? "https://rpc.mainnet.fastnear.com" : "https://test.rpc.fastnear.com");
 const maxPayment = env.NEARFIREWALL_MAX_PAYMENT ? parseNear(env.NEARFIREWALL_MAX_PAYMENT) : null;
+const maxX402 = env.NEARFIREWALL_MAX_X402 ? parseUsdc(env.NEARFIREWALL_MAX_X402) : null;
 
 const publicKey = KeyPair.fromString(secret as KeyPairString).getPublicKey().toString();
 const signer = new Account(account, rpcUrl, secret as KeyPairString);
+const rpc = new NearRpc(rpcUrl);
 
 const connection = new AgentConnection({
-  rpc: new NearRpc(rpcUrl),
+  rpc,
   account,
   publicKey,
   submit: async (args, gas) => {
@@ -49,6 +56,8 @@ const connection = new AgentConnection({
   },
 });
 
-const server = createServer(connection, { maxPayment });
+const x402 = new X402Buyer({ connection, secretKey: secret as KeyPairString, network, rpc, maxPayment: maxX402 });
+
+const server = createServer(connection, { maxPayment, x402 });
 await server.connect(new StdioServerTransport());
 console.error(`nearfirewall-mcp: ready for ${account} (${network}), key ${publicKey.slice(0, 16)}…`);

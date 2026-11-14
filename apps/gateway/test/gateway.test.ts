@@ -297,3 +297,64 @@ describe("serialSubmit", () => {
     expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected", "fulfilled"]);
   });
 });
+
+describe("gateway: x402", () => {
+  /** A buyer that fetches through the transport it is given and reports a payment. */
+  function fakeBuyer(fetched: { url: string; maxAmount: bigint | null | undefined }[]) {
+    return () =>
+      ({
+        async fetch(url: string, opts: { maxAmount?: bigint | null }) {
+          fetched.push({ url, maxAmount: opts.maxAmount });
+          return {
+            status: "paid",
+            response: { status: 200, url, headers: {}, body: "the report" },
+            payment: {
+              resource: url,
+              payTo: "seller.testnet",
+              amount: 50_000n,
+              asset: "usdc.testnet",
+              requestId: "c".repeat(64),
+              fundingTx: "fund1",
+              settlement: { success: true, transaction: "settle1", network: "near:testnet" },
+            },
+          };
+        },
+      }) as never;
+  }
+
+  it("is off unless the gateway is given a buyer", async () => {
+    const { base } = await start();
+    const r = await post(`${base}/api/x402/fetch`, { url: "https://seller.example/report" });
+    expect(r.status).toBe(404);
+  });
+
+  it("fetches and pays through the owner's policy, and reports the payment as JSON", async () => {
+    const fetched: { url: string; maxAmount: bigint | null | undefined }[] = [];
+    const { base } = await start({ x402: fakeBuyer(fetched) });
+    const r = await post(`${base}/api/x402/fetch`, { url: "https://seller.example/report", max_usdc: "0.05" });
+    expect(r.status).toBe(200);
+    expect(await r.json()).toMatchObject({
+      status: "paid",
+      http_status: 200,
+      content: "the report",
+      payment: { pay_to: "seller.testnet", amount_usdc: "0.05", funding_tx: "fund1", settlement_tx: "settle1" },
+    });
+    expect(fetched).toEqual([{ url: "https://seller.example/report", maxAmount: 50_000n }]);
+  });
+
+  it("validates the request body", async () => {
+    const { base } = await start({ x402: fakeBuyer([]) });
+    expect((await post(`${base}/api/x402/fetch`, { url: "not a url" })).status).toBe(400);
+    expect((await post(`${base}/api/x402/fetch`, { url: "https://a.example/", max_usdc: "lots" })).status).toBe(400);
+    expect((await post(`${base}/api/x402/fetch`, { url: "https://a.example/", extra: 1 })).status).toBe(400);
+  });
+
+  it("labels x402 activity in USDC", async () => {
+    const { base, connection } = await start();
+    (connection as any).activity = async () => [
+      { at: 1_700_000_000_000_000_000n, recipient: "seller.testnet", amount: 50_000n, outcome: "settled", reason: null, via: { kind: "x402", public_key: "ed25519:x", label: "w", payment_account: "ab".repeat(32) } },
+    ];
+    const entries = await (await fetch(`${base}/api/activity`, { headers: auth })).json();
+    expect(entries[0]).toMatchObject({ recipient: "seller.testnet", amount_usdc: "0.05", via: "x402" });
+  });
+});

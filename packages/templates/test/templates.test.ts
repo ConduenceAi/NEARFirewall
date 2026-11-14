@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { DAY_NS, LOCKS, NearRpc, PolicyClient, RegistryClient, parseNear, transferCapability } from "@nearfirewall/sdk";
+import { DAY_NS, LOCKS, NearRpc, PolicyClient, RegistryClient, USDC_CONTRACT, parseNear, parseUsdc, transferCapability } from "@nearfirewall/sdk";
 import {
   approvedVendors,
+  x402Buyer,
   buildPlan,
   getTemplate,
   toTransaction,
@@ -230,5 +231,81 @@ describe("validatePlanLive", () => {
     if (action.type !== "FunctionCall") throw new Error();
     expect(action.params.methodName).toBe("set_mandate");
     expect(action.params.args.path).toEqual([{ agent_id: "1", generation: 4 }]);
+  });
+});
+
+describe("x402 buyer template", () => {
+  const input = {
+    handle: "researcher",
+    maxPerPayment: "0.5",
+    dailyBudget: "2",
+    sellers: [{ seller: "data-agent.testnet", perPayment: "0.5", daily: "1" }],
+  };
+
+  it("builds an x402-only agent with a small default budget for unlisted sellers", () => {
+    const plan = buildPlan(x402Buyer, input, ctx);
+    expect(plan.steps.map((s) => s.kind)).toEqual(["register_agent", "set_x402_config", "set_mandate", "set_x402_rules"]);
+    const [register, config, mandate, rules] = plan.steps;
+    if (register?.kind !== "register_agent" || config?.kind !== "set_x402_config" || mandate?.kind !== "set_mandate" || rules?.kind !== "set_x402_rules") {
+      throw new Error("unexpected steps");
+    }
+    expect(register.x402).toEqual({ max_per_payment: parseUsdc("0.5") });
+    expect(register.capabilities).toEqual({});
+    expect(register.locks).toBe(LOCKS.NO_TRANSFER);
+    expect(config.asset).toBe(USDC_CONTRACT.testnet);
+    expect(mandate.dailyCap).toBe(0n);
+    expect(rules.rules).toEqual({
+      dailyCap: parseUsdc("2"),
+      sellers: [{ seller: "data-agent.testnet", perPaymentCap: parseUsdc("0.5"), dailyCap: parseUsdc("1") }],
+      unlisted: { perPaymentCap: parseUsdc("0.05"), dailyCap: parseUsdc("0.25") },
+    });
+    expect(validatePlan(plan, ctx)).toEqual({ ok: true, issues: [] });
+    expect(getTemplate("x402-buyer")).toBe(x402Buyer);
+  });
+
+  it("can refuse unlisted sellers and skip turning x402 on", () => {
+    const plan = buildPlan(x402Buyer, { ...input, unlisted: null, turnOnX402: false }, ctx);
+    expect(plan.steps.map((s) => s.kind)).toEqual(["register_agent", "set_mandate", "set_x402_rules"]);
+    const rules = plan.steps.at(-1)!;
+    if (rules.kind !== "set_x402_rules") throw new Error();
+    expect(rules.rules.unlisted).toBeNull();
+  });
+
+  it("flags x402 limits the contracts would refuse or the agent cannot use", () => {
+    const plan = buildPlan(x402Buyer, input, ctx);
+    const rules = plan.steps.at(-1)!;
+    if (rules.kind !== "set_x402_rules") throw new Error();
+    rules.rules.sellers.push({ seller: "alice.testnet", perPaymentCap: 1n, dailyCap: 1n });
+    rules.rules.sellers.push({ seller: "big.testnet", perPaymentCap: parseUsdc("1"), dailyCap: parseUsdc("1") });
+    rules.rules.unlisted = { perPaymentCap: 10n, dailyCap: 5n };
+    expect(codes(plan)).toEqual(expect.arrayContaining(["RECIPIENT_IS_PAYER", "RULE_ABOVE_CAPABILITY", "PER_PAYMENT_ABOVE_DAILY"]));
+  });
+
+  it("requires an approval before x402 limits, and a NEAR budget for NEAR recipients", () => {
+    const plan = buildPlan(x402Buyer, input, ctx);
+    const withoutMandate: Plan = { ...plan, steps: plan.steps.filter((s) => s.kind !== "set_mandate") };
+    expect(codes(withoutMandate)).toContain("X402_NEEDS_MANDATE");
+    const nearWithZero: Plan = {
+      ...plan,
+      steps: plan.steps.map((s) =>
+        s.kind === "set_mandate" ? { ...s, recipients: [{ recipient: "vendor.testnet", perPaymentCap: 1n, dailyCap: 1n }] } : s,
+      ),
+    };
+    expect(codes(nearWithZero)).toContain("ZERO_CAP");
+  });
+
+  it("turns each step into the matching owner transaction", async () => {
+    const plan = buildPlan(x402Buyer, input, ctx);
+    const registry = { resolve: async () => ({ agent_id: "7" }), getPath: async () => [{ agent_id: "7", generation: 3n }] } as unknown as RegistryClient;
+    const txs = await Promise.all(plan.steps.map((s) => toTransaction(s, ctx, registry)));
+    const methods = txs.map((t) => (t.actions[0]!.type === "FunctionCall" ? t.actions[0]!.params.methodName : t.actions[0]!.type));
+    expect(methods).toEqual(["register_agent", "set_x402_config", "set_mandate", "set_x402_rules"]);
+    const register = txs[0]!.actions[0]!;
+    if (register.type !== "FunctionCall") throw new Error();
+    expect(register.params.args.x402).toEqual({ max_per_payment: "500000" });
+    const rules = txs[3]!.actions[0]!;
+    if (rules.type !== "FunctionCall") throw new Error();
+    expect(rules.params.args.agent_id).toBe("7");
+    expect(txs[1]!.receiverId).toBe("alice.testnet");
   });
 });

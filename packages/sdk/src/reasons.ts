@@ -35,6 +35,9 @@ export const REASON_TEXT: Record<Reason, string> = {
   CONFIRMATION_EXPIRED: "Nobody confirmed this payment in time, so it was released.",
   TOO_MANY_PENDING: "Too many payments are already waiting for the owner's confirmation.",
   RECIPIENT_BLOCKED: "This recipient is on the owner's blocklist, so no agent may pay it.",
+  X402_NOT_ENABLED: "The owner has not turned on x402 payments for this agent.",
+  ASSET_NOT_ACCEPTED: "The seller asked for a token other than the owner's x402 token (USDC).",
+  UNLISTED_DAILY_CAP: "Today's budget for sellers the owner has not approved by name is used up.",
 };
 
 export function describeReason(reason: Reason): string {

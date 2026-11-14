@@ -9,6 +9,8 @@
  *   NEARFIREWALL_NETWORK       testnet (default) or mainnet
  *   NEARFIREWALL_RPC_URL       optional RPC endpoint
  *   NEARFIREWALL_MAX_PAYMENT   optional ceiling per payment, in NEAR
+ *   NEARFIREWALL_MAX_X402      optional ceiling per x402 payment, in USDC
+ *   NEARFIREWALL_X402          set to 0 to turn off x402 (fetch_paid and /api/x402/fetch)
  *   PORT                       default 8787
  *   HOST                       default 127.0.0.1 (use 0.0.0.0 inside a container)
  *   GATEWAY_ALLOWED_ORIGINS    optional, comma-separated browser origins allowed to call the API
@@ -18,7 +20,8 @@
  */
 import { createServer } from "node:http";
 import { Account, KeyPair, type KeyPairString } from "near-api-js";
-import { AgentConnection, MemoryJournalStore, NearRpc, OperationJournal, parseNear } from "@nearfirewall/sdk";
+import { AgentConnection, MemoryJournalStore, NearRpc, OperationJournal, parseNear, parseUsdc } from "@nearfirewall/sdk";
+import { X402Buyer, serializer } from "@nearfirewall/x402";
 import { createGateway } from "./gateway.ts";
 import { serialSubmit } from "./serial.ts";
 
@@ -36,6 +39,7 @@ if (token.length < 32) fail("GATEWAY_TOKEN must be at least 32 characters (opens
 const network = env.NEARFIREWALL_NETWORK === "mainnet" ? "mainnet" : "testnet";
 const rpcUrl = env.NEARFIREWALL_RPC_URL ?? (network === "mainnet" ? "https://rpc.mainnet.fastnear.com" : "https://test.rpc.fastnear.com");
 const maxPayment = env.NEARFIREWALL_MAX_PAYMENT ? parseNear(env.NEARFIREWALL_MAX_PAYMENT) : null;
+const maxX402 = env.NEARFIREWALL_MAX_X402 ? parseUsdc(env.NEARFIREWALL_MAX_X402) : null;
 const port = Number(env.PORT ?? 8787);
 const host = env.HOST ?? "127.0.0.1";
 
@@ -43,6 +47,7 @@ const publicKey = KeyPair.fromString(secret as KeyPairString).getPublicKey().toS
 const signer = new Account(account, rpcUrl, secret as KeyPairString);
 const rpc = new NearRpc(rpcUrl);
 const journal = new OperationJournal(new MemoryJournalStore());
+const x402Queue = serializer();
 const submit = serialSubmit(async (args, gas) => {
   const response = await signer.callFunctionRaw({
     contractId: account,
@@ -61,7 +66,13 @@ const listener = createGateway({
   allowedOrigins: (env.GATEWAY_ALLOWED_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean),
   trustProxy: env.GATEWAY_TRUST_PROXY === "1",
   connection: (client) => new AgentConnection({ rpc, account, publicKey, submit, journal, client }),
+  ...(env.NEARFIREWALL_X402 === "0" ? {} : { x402: x402Buyer }),
 });
+
+// One payment at a time across every request: they share the key and its payment account.
+function x402Buyer(connection: AgentConnection): X402Buyer {
+  return new X402Buyer({ connection, secretKey: secret as KeyPairString, network, rpc, maxPayment: maxX402, serialize: x402Queue });
+}
 
 const server = createServer(listener);
 server.requestTimeout = 90_000;

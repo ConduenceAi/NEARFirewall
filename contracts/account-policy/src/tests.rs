@@ -1793,3 +1793,589 @@ fn only_the_owner_adds_guardians() {
     set_env(registry(), 1, T0, 100);
     p.add_guardian_key(agent_key(1), "x".into());
 }
+
+// ---------------------------------------------------------------- x402
+
+/// USDC has 6 decimals; amounts below are in cents for readability.
+const USDC: u128 = 1_000_000;
+
+fn usdc() -> AccountId {
+    acc("usdc.testnet")
+}
+
+fn cents(n: u128) -> u128 {
+    n * USDC / 100
+}
+
+fn x402(seller: &str, c: u128) -> Action {
+    Action::X402Pay {
+        asset: usdc(),
+        pay_to: acc(seller),
+        amount: U128(cents(c)),
+    }
+}
+
+fn limit(per: u128, daily: u128) -> X402Limit {
+    X402Limit {
+        per_payment_cap: U128(cents(per)),
+        daily_cap: U128(cents(daily)),
+    }
+}
+
+fn seller(name: &str, per: u128, daily: u128) -> X402SellerInput {
+    X402SellerInput {
+        seller: acc(name),
+        per_payment_cap: U128(cents(per)),
+        daily_cap: U128(cents(daily)),
+    }
+}
+
+/// The payment account of `agent_key(7)`: its 32 bytes as hex.
+fn payment_account() -> AccountId {
+    acc(&"07".repeat(32))
+}
+
+/// The connected policy with x402 on: a 1 USDC daily budget, `known.testnet`
+/// approved at 20c per payment and 50c a day, and any other seller at 5c per
+/// payment and 10c a day in total.
+fn x402_policy() -> (AccountPolicy, PublicKey) {
+    let (mut p, key) = connected_policy();
+    as_owner(T0);
+    p.set_x402_config(Some(usdc()), None);
+    as_owner(T0);
+    p.set_x402_rules(
+        "1".into(),
+        U128(cents(100)),
+        vec![seller("known.testnet", 20, 50)],
+        Some(limit(5, 10)),
+    );
+    (p, key)
+}
+
+/// Runs an x402 request through `on_authorized` with path `node("1", generation)`,
+/// then settles the funding with `settle` (None leaves it in flight).
+fn through_x402_with(
+    p: &mut AccountPolicy,
+    key: &PublicKey,
+    action: Action,
+    request: u64,
+    generation: u64,
+    settle: Option<bool>,
+) -> Outcome {
+    as_callback(T0);
+    match p.on_authorized(
+        String::from(key),
+        action,
+        rid(request),
+        Some("Claude Desktop".into()),
+        allowed(vec![node("1", generation)]),
+    ) {
+        PromiseOrValue::Value(outcome) => outcome,
+        PromiseOrValue::Promise(_) => match settle {
+            Some(success) => p.settle(&request_key("1", &rid(request)), success),
+            None => Outcome::Settled {
+                request_id: "in flight".into(),
+            },
+        },
+    }
+}
+
+fn pay_x402(
+    p: &mut AccountPolicy,
+    key: &PublicKey,
+    seller: &str,
+    c: u128,
+    request: u64,
+) -> Outcome {
+    through_x402_with(p, key, x402(seller, c), request, 10, Some(true))
+}
+
+#[test]
+fn x402_payment_account_is_the_keys_implicit_account() {
+    let (p, key) = x402_policy();
+    assert_eq!(p.get_x402_account(key), Some(payment_account()));
+    let secp = PublicKey::from_parts(CurveType::SECP256K1, vec![1; 64]).unwrap();
+    assert_eq!(p.get_x402_account(secp), None);
+}
+
+#[test]
+fn x402_listed_seller_settles_and_is_recorded_in_the_token() {
+    let (mut p, key) = x402_policy();
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 1), settled(1));
+    let usage = p.get_x402_usage("1".into(), Some(acc("known.testnet")));
+    assert_eq!(usage.mandate_used_today, U128(cents(20)));
+    assert_eq!(usage.seller_used_today, Some(U128(cents(20))));
+    assert_eq!(usage.unlisted_used_today, U128(0));
+    assert_eq!(usage.account_used_today, U128(cents(20)));
+    // NEAR budgets and reservations are untouched.
+    let policy = p.get_policy();
+    assert_eq!(policy.account_used_today, U128(0));
+    assert_eq!(policy.reserved_total, U128(0));
+    assert_eq!(p.get_usage("1".into(), None).mandate_used_today, U128(0));
+
+    let activity = &p.get_activity(None, Some(1))[0];
+    assert_eq!(activity.outcome, "settled");
+    assert_eq!(activity.recipient, acc("known.testnet"));
+    assert_eq!(activity.amount, U128(cents(20)));
+    assert_eq!(
+        activity.via,
+        Some(Via::X402 {
+            public_key: String::from(&key),
+            label: "Claude on laptop".into(),
+            payment_account: payment_account(),
+        })
+    );
+    assert_eq!(
+        p.get_request("1".into(), rid(1)).unwrap().status,
+        RequestStatus::Settled
+    );
+}
+
+#[test]
+fn x402_listed_seller_caps_apply() {
+    let (mut p, key) = x402_policy();
+    assert_eq!(
+        pay_x402(&mut p, &key, "known.testnet", 21, 1),
+        denied(Reason::PerPaymentCap)
+    );
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 2), settled(2));
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 3), settled(3));
+    assert_eq!(
+        pay_x402(&mut p, &key, "known.testnet", 20, 4),
+        denied(Reason::RecipientDailyCap)
+    );
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 10, 5), settled(5));
+}
+
+#[test]
+fn x402_unlisted_sellers_share_one_small_budget() {
+    let (mut p, key) = x402_policy();
+    assert_eq!(
+        pay_x402(&mut p, &key, "a.testnet", 6, 1),
+        denied(Reason::PerPaymentCap)
+    );
+    assert_eq!(pay_x402(&mut p, &key, "a.testnet", 5, 2), settled(2));
+    assert_eq!(pay_x402(&mut p, &key, "b.testnet", 5, 3), settled(3));
+    // A third seller cannot get around the shared pool.
+    assert_eq!(
+        pay_x402(&mut p, &key, "c.testnet", 1, 4),
+        denied(Reason::UnlistedDailyCap)
+    );
+    assert_eq!(
+        p.get_x402_usage("1".into(), None).unlisted_used_today,
+        U128(cents(10))
+    );
+    // An approved seller still has its own room.
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 5), settled(5));
+}
+
+#[test]
+fn x402_without_an_unlisted_rule_refuses_unknown_sellers() {
+    let (mut p, key) = x402_policy();
+    as_owner(T0);
+    p.set_x402_rules(
+        "1".into(),
+        U128(cents(100)),
+        vec![seller("known.testnet", 20, 50)],
+        None,
+    );
+    assert_eq!(
+        pay_x402(&mut p, &key, "stranger.testnet", 1, 1),
+        denied(Reason::RecipientNotApproved)
+    );
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 1, 2), settled(2));
+}
+
+#[test]
+fn x402_branch_and_account_caps_apply() {
+    let (mut p, key) = x402_policy();
+    as_owner(T0);
+    p.set_x402_rules(
+        "1".into(),
+        U128(cents(30)),
+        vec![seller("known.testnet", 20, 50)],
+        Some(limit(5, 10)),
+    );
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 1), settled(1));
+    assert_eq!(
+        pay_x402(&mut p, &key, "known.testnet", 20, 2),
+        denied(Reason::MandateDailyCap)
+    );
+    as_owner(T0);
+    p.set_x402_config(Some(usdc()), Some(U128(cents(25))));
+    assert_eq!(
+        pay_x402(&mut p, &key, "known.testnet", 10, 3),
+        denied(Reason::AccountDailyCap)
+    );
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 5, 4), settled(4));
+}
+
+#[test]
+fn x402_refuses_other_tokens_and_needs_x402_turned_on() {
+    let (mut p, key) = x402_policy();
+    let other = Action::X402Pay {
+        asset: acc("other-token.testnet"),
+        pay_to: acc("known.testnet"),
+        amount: U128(cents(1)),
+    };
+    assert_eq!(
+        through_x402_with(&mut p, &key, other, 1, 10, Some(true)),
+        denied(Reason::AssetNotAccepted)
+    );
+    as_owner(T0);
+    p.remove_x402_rules("1".into());
+    assert_eq!(
+        pay_x402(&mut p, &key, "known.testnet", 1, 2),
+        denied(Reason::X402NotEnabled)
+    );
+    as_owner(T0);
+    p.set_x402_config(None, None);
+    assert_eq!(p.get_x402_config(), None);
+    assert_eq!(
+        pay_x402(&mut p, &key, "known.testnet", 1, 3),
+        denied(Reason::X402NotEnabled)
+    );
+}
+
+#[test]
+fn x402_failed_funding_releases_the_reservation() {
+    let (mut p, key) = x402_policy();
+    assert_eq!(
+        through_x402_with(&mut p, &key, x402("a.testnet", 5), 1, 10, Some(false)),
+        Outcome::Failed { request_id: rid(1) }
+    );
+    let usage = p.get_x402_usage("1".into(), Some(acc("a.testnet")));
+    assert_eq!(usage.mandate_used_today, U128(0));
+    assert_eq!(usage.seller_used_today, Some(U128(0)));
+    assert_eq!(usage.unlisted_used_today, U128(0));
+    assert_eq!(usage.account_used_today, U128(0));
+    // The released pool is usable again, and the request ID stays used.
+    assert_eq!(pay_x402(&mut p, &key, "a.testnet", 5, 2), settled(2));
+    assert_eq!(
+        pay_x402(&mut p, &key, "b.testnet", 5, 1),
+        denied(Reason::DuplicateRequest)
+    );
+}
+
+#[test]
+fn x402_never_pays_the_account_itself_or_the_payment_account() {
+    let (mut p, key) = x402_policy();
+    assert_eq!(
+        pay_x402(&mut p, &key, &"07".repeat(32), 1, 1),
+        denied(Reason::InvalidRequest)
+    );
+    assert_eq!(
+        pay_x402(&mut p, &key, "alice.testnet", 1, 2),
+        denied(Reason::InvalidRequest)
+    );
+}
+
+#[test]
+fn x402_respects_pause_blocklist_and_stale_mandates() {
+    let (mut p, key) = x402_policy();
+    assert_eq!(
+        through_x402_with(&mut p, &key, x402("known.testnet", 1), 1, 11, Some(true)),
+        denied(Reason::MandateStale)
+    );
+    as_owner(T0);
+    p.block_recipient(acc("known.testnet"), None);
+    assert_eq!(
+        pay_x402(&mut p, &key, "known.testnet", 1, 2),
+        denied(Reason::RecipientBlocked)
+    );
+    as_owner(T0);
+    p.pause();
+    assert_eq!(
+        pay_x402(&mut p, &key, "a.testnet", 1, 3),
+        denied(Reason::PaymentsPaused)
+    );
+}
+
+#[test]
+fn x402_denials_are_recorded_in_the_token() {
+    let (mut p, key) = x402_policy();
+    let denied_by_registry = Ok(Authorization::Denied {
+        reason: Reason::CapExceeded,
+        detail: None,
+    });
+    as_callback(T0);
+    let outcome = p.on_authorized(
+        String::from(&key),
+        x402("known.testnet", 30),
+        rid(1),
+        None,
+        denied_by_registry,
+    );
+    assert!(matches!(
+        outcome,
+        PromiseOrValue::Value(Outcome::Denied {
+            reason: Reason::CapExceeded,
+            ..
+        })
+    ));
+    let activity = &p.get_activity(None, Some(1))[0];
+    assert!(matches!(activity.via, Some(Via::X402 { .. })));
+    assert_eq!(activity.amount, U128(cents(30)));
+}
+
+#[test]
+fn x402_and_near_budgets_are_separate() {
+    let (mut p, key) = x402_policy();
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 1), settled(1));
+    // A NEAR payment through the same connection uses only the NEAR budget.
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("1", 10)]),
+            "vendor.testnet",
+            2,
+            2
+        ),
+        settled(2)
+    );
+    assert_eq!(
+        p.get_usage("1".into(), None).mandate_used_today,
+        U128(2 * NEAR)
+    );
+    assert_eq!(
+        p.get_x402_usage("1".into(), None).mandate_used_today,
+        U128(cents(20))
+    );
+}
+
+#[test]
+fn zero_near_budget_mandates_allow_x402_only() {
+    let (mut p, key) = x402_policy();
+    as_owner(T0);
+    p.set_mandate(
+        "1".into(),
+        vec![node("1", 10)],
+        U128(0),
+        None,
+        false,
+        vec![],
+        None,
+    );
+    assert_eq!(
+        through_connection(
+            &mut p,
+            &key,
+            allowed(vec![node("1", 10)]),
+            "vendor.testnet",
+            1,
+            1
+        ),
+        denied(Reason::RecipientNotApproved)
+    );
+    // The x402 rules are kept when the mandate is replaced.
+    assert_eq!(pay_x402(&mut p, &key, "known.testnet", 20, 2), settled(2));
+}
+
+#[test]
+#[should_panic(expected = "Approved recipients need a NEAR daily budget above zero")]
+fn zero_near_budget_mandates_cannot_list_recipients() {
+    let mut p = new_policy();
+    as_owner(T0);
+    p.set_mandate(
+        "1".into(),
+        vec![node("1", 10)],
+        U128(0),
+        None,
+        false,
+        vec![rule("vendor.testnet", 1, 2)],
+        None,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Approved recipients need a NEAR daily budget above zero")]
+fn zero_near_budget_mandates_cannot_approve_recipients_later() {
+    let mut p = new_policy();
+    as_owner(T0);
+    p.set_mandate(
+        "1".into(),
+        vec![node("1", 10)],
+        U128(0),
+        None,
+        false,
+        vec![],
+        None,
+    );
+    as_owner(T0);
+    p.approve_recipient(
+        "1".into(),
+        acc("vendor.testnet"),
+        U128(NEAR),
+        U128(2 * NEAR),
+        None,
+    );
+}
+
+#[test]
+fn approving_and_removing_sellers_keeps_todays_usage() {
+    let (mut p, key) = x402_policy();
+    assert_eq!(pay_x402(&mut p, &key, "a.testnet", 5, 1), settled(1));
+    as_owner(T0);
+    p.approve_x402_seller(
+        "1".into(),
+        acc("a.testnet"),
+        U128(cents(20)),
+        U128(cents(24)),
+    );
+    // 5c already paid counts toward a's new 24c daily limit.
+    assert_eq!(
+        pay_x402(&mut p, &key, "a.testnet", 20, 2),
+        denied(Reason::RecipientDailyCap)
+    );
+    assert_eq!(pay_x402(&mut p, &key, "a.testnet", 19, 3), settled(3));
+    as_owner(T0);
+    p.remove_x402_seller("1".into(), acc("a.testnet"));
+    // Unlisted again: the shared pool (5c of 10c used) applies.
+    assert_eq!(pay_x402(&mut p, &key, "a.testnet", 5, 4), settled(4));
+    assert_eq!(
+        pay_x402(&mut p, &key, "a.testnet", 1, 5),
+        denied(Reason::UnlistedDailyCap)
+    );
+}
+
+#[test]
+fn x402_preview_runs_the_same_checks() {
+    let (p, _) = x402_policy();
+    as_callback(T0);
+    let ctx = |action| ExecContext {
+        path: vec![node("1", 10)],
+        executor: acc("alice.testnet"),
+        action,
+        request_id: rid(9),
+        expected_revision: None,
+    };
+    let ok = p.preview(ctx(x402("known.testnet", 20)));
+    assert!(ok.allowed);
+    assert_eq!(ok.mandates, vec!["1".to_string()]);
+    assert!(!ok.needs_confirmation);
+    let refused = p.preview(ctx(x402("known.testnet", 21)));
+    assert_eq!(refused.reason, Some(Reason::PerPaymentCap));
+}
+
+#[test]
+#[should_panic(expected = "Attach at least 125 Tgas to agent_execute for an x402 payment")]
+fn agent_execute_needs_more_gas_for_x402() {
+    let (mut p, key) = x402_policy();
+    as_key(&key, T0, 100);
+    let _ = p.agent_execute(x402("known.testnet", 1), rid(1), None);
+}
+
+#[test]
+fn agent_execute_refuses_x402_for_keys_without_a_payment_account() {
+    let (mut p, _) = x402_policy();
+    let secp = PublicKey::from_parts(CurveType::SECP256K1, vec![1; 64]).unwrap();
+    as_owner(T0);
+    p.connect_agent_key("1".into(), secp.clone(), "custom".into(), "secp key".into());
+    as_key(&secp, T0, 150);
+    assert!(matches!(
+        p.agent_execute(x402("known.testnet", 1), rid(1), None),
+        PromiseOrValue::Value(Outcome::Denied {
+            reason: Reason::InvalidRequest,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn agent_execute_routes_x402_through_the_registry() {
+    let (mut p, key) = x402_policy();
+    as_key(&key, T0, 150);
+    assert!(matches!(
+        p.agent_execute(x402("known.testnet", 1), rid(1), None),
+        PromiseOrValue::Promise(_)
+    ));
+}
+
+#[test]
+fn executor_mode_refuses_x402() {
+    let (mut p, _) = x402_policy();
+    set_env(registry(), 0, T0, 100);
+    let ctx = ExecContext {
+        path: vec![node("1", 10)],
+        executor: acc("runner.testnet"),
+        action: x402("known.testnet", 1),
+        request_id: rid(1),
+        expected_revision: None,
+    };
+    match p.on_execute(ctx) {
+        PromiseOrValue::Value(Outcome::Denied { reason, detail }) => {
+            assert_eq!(reason, Reason::InvalidRequest);
+            assert_eq!(
+                detail.as_deref(),
+                Some("x402 payments need a connection key")
+            );
+        }
+        _ => panic!("must not dispatch"),
+    }
+}
+
+#[test]
+#[should_panic(expected = "No mandate for agent")]
+fn x402_rules_need_a_mandate() {
+    let (mut p, _) = x402_policy();
+    as_owner(T0);
+    p.set_x402_rules("2".into(), U128(cents(100)), vec![], None);
+}
+
+#[test]
+#[should_panic(expected = "A fixed mandate cannot be edited")]
+fn x402_rules_cannot_change_a_fixed_mandate() {
+    let mut p = new_policy();
+    as_owner(T0);
+    p.set_mandate(
+        "1".into(),
+        vec![node("1", 10)],
+        U128(0),
+        None,
+        true,
+        vec![],
+        None,
+    );
+    as_owner(T0);
+    p.set_x402_rules("1".into(), U128(cents(100)), vec![], None);
+}
+
+#[test]
+#[should_panic(expected = "Unlisted sellers: the per-payment cap cannot exceed the daily cap")]
+fn x402_limits_are_validated() {
+    let (mut p, _) = x402_policy();
+    as_owner(T0);
+    p.set_x402_rules("1".into(), U128(cents(100)), vec![], Some(limit(10, 5)));
+}
+
+#[test]
+#[should_panic(expected = "Only the account itself can change its policy")]
+fn only_the_owner_sets_x402_rules() {
+    let (mut p, _) = x402_policy();
+    set_env(registry(), 1, T0, 100);
+    p.set_x402_rules("1".into(), U128(cents(100)), vec![], None);
+}
+
+#[test]
+#[should_panic(expected = "Turn x402 on first")]
+fn x402_account_setup_needs_x402_on() {
+    let (mut p, key) = connected_policy();
+    as_owner(T0);
+    let _ = p.setup_x402_account(key);
+}
+
+#[test]
+#[should_panic(expected = "This key is not connected")]
+fn x402_account_setup_needs_a_connected_key() {
+    let (mut p, _) = x402_policy();
+    as_owner(T0);
+    let _ = p.setup_x402_account(agent_key(99));
+}
+
+#[test]
+fn x402_account_setup_schedules_funding_and_registration() {
+    let (mut p, key) = x402_policy();
+    as_owner(T0);
+    let _ = p.setup_x402_account(key);
+}

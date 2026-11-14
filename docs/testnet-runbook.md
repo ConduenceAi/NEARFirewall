@@ -26,6 +26,30 @@ node scripts/v2-owner.ts <owner>.testnet pending | confirm <request-id> | declin
 
 The handoff recorded the Testnet flow using the CLI and local MCP on `nfw-owner-1113.testnet`, with the key subsequently deleted. The dashboard has been exercised with a mock wallet. A fresh signed Meteor walkthrough and global-contract publication are pending.
 
+## x402 payments in USDC between agents
+
+Not yet run on Testnet. These steps need contracts built from the x402 revision. An owner registry deployed earlier has no access keys, so it cannot be upgraded, so start from a fresh owner account.
+
+1. Follow steps 1–3 above with the new build. When registering the buyer agent, set **Max per x402 payment (USDC)**, for example 0.5.
+2. Get Testnet USDC for the owner account. The contract is `3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af`, with 6 decimals. The owner account must be registered with it (`storage_deposit`).
+3. Under **Payments → x402 payments (USDC)**:
+   - Choose **Turn on x402 in USDC**.
+   - For the agent, choose **Approve for x402 only**.
+   - Set its daily budget and the unlisted-seller budget. The defaults are 0.05 USDC each and 0.25 USDC a day.
+   - Optionally approve a seller by name.
+4. Connect the agent as in step 5 above. Then, under **Payments → x402**, choose **Set up** next to the connection. It sends 0.01 NEAR to the key's payment account and registers that account with USDC.
+5. Run a seller. It can be a second owner's agent or any service that uses `createPaywall` from `@nearfirewall/x402`:
+   - Set `payTo` to an account registered with USDC.
+   - Set `facilitatorUrl` to an x402 facilitator for `near:testnet`, plus its API key if it needs one.
+6. From the buyer's MCP client, call `get_rules` (it lists the x402 limits), then `fetch_paid` on the seller's URL with `max_usdc`. Check these four outcomes:
+   - A price within the limits is paid, and **Activity** shows it in USDC.
+   - A price above the per-payment cap is refused with `PER_PAYMENT_CAP`.
+   - A second unlisted seller beyond the shared pool is refused with `UNLISTED_DAILY_CAP`.
+   - With x402 turned off, payments are refused with `X402_NOT_ENABLED`.
+7. If a seller refuses a funded payment, call `return_unspent_usdc` and check that the USDC returns to the owner.
+
+The MCP server and the gateway read `NEARFIREWALL_MAX_X402`, an optional local ceiling per x402 payment in USDC. The gateway turns x402 off with `NEARFIREWALL_X402=0`.
+
 ## Current deployment
 
 | Role | Account |
